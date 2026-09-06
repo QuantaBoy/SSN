@@ -145,3 +145,35 @@ class SSN(nn.Module):
 
     def save(self, path, **kwargs):
         torch.save({"state_dict": self.state_dict(), "kwargs": kwargs}, path)
+
+
+def _demo():
+    torch.manual_seed(0)
+    m = SSN()
+    x = torch.randn(2, T_STEPS, 2, CROP, CROP)
+    y = m(x)
+    assert y.shape == (2,), y.shape
+    assert m.confidence(x).shape == (2,)
+    assert 0.0 <= m.last_spike_rate <= 1.0
+
+    # the point of the LIF: weak-but-persistent evidence fires, an equally weak
+    # one-off leaks away. Checked on the neuron, not the untrained net, whose
+    # random weights say nothing.
+    def fires(drive):  # drive: list of per-step inputs to one neuron
+        lif, v, total = LIF(1), torch.zeros(1, 1, 1, 1), 0.0
+        for value in drive:
+            s, v = lif(torch.full((1, 1, 1, 1), value), v)
+            total += float(s.detach().sum())
+        return total
+
+    assert fires([0.6] * T_STEPS) >= 1.0
+    assert fires([0.6] + [0.0] * (T_STEPS - 1)) == 0.0
+
+    y.sum().backward()  # surrogate gradient reaches the first conv
+    assert m.blocks[0].conv.weight.grad.abs().sum() > 0
+    print(f"ok: logits {tuple(y.shape)}, params {m.num_params()}, "
+          f"spike rate {m.last_spike_rate:.3f}")
+
+
+if __name__ == "__main__":
+    _demo()

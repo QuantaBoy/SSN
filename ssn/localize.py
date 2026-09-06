@@ -1,163 +1,200 @@
-"""Pixel -> floor point -> arena grid cell, plus survivor de-duplication.
+"""Turn a verified detection into an arena grid cell.
 
-The mission is scored on the grid box a survivor is in, not on a bounding box, so
-this file is where detection turns into points. Indoors every survivor is on the
-floor, which makes the localisation a ray/plane intersection rather than a depth
-estimate: cast the ray through the bottom-centre pixel of the detection and
-intersect it with the floor plane at the drone's known altitude.
+The mission reports *where* a survivor is, not just that one exists, and it does
+so without GPS. What is known instead is the drone pose from the SLAM front-end
+and the camera intrinsics, and one strong fact about the scene: survivors are on
+the floor. That fact is what makes the problem solvable from a single camera -
+the pixel gives a ray, the floor plane gives the depth the ray is missing.
 
-Frames:
-  world  - X right, Y forward, Z up. Origin at the arena corner nearest the entry
-           point, axes along the arena walls. Metres.
-  yaw    - radians, CCW from +X.
-  pitch  - radians, nose/camera down positive.
+World frame: x east, y north, z up, floor at z = 0, origin at the arena corner.
+Camera frame: x right, y down, z along the optical axis (standard pinhole).
 """
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+
+import numpy as np
+
+# camera->world rotation for a camera pointing straight down with zero yaw:
+# optical axis to world -z, image x to world +x, image y (down) to world -y.
+NADIR = np.array([[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]])
 
 
-@dataclass
+@dataclass(frozen=True)
 class Camera:
-    width: int = 640
-    height: int = 480
-    hfov_deg: float = 70.0
-    mount_pitch_deg: float = 20.0  # fixed downward tilt of the camera on the airframe
+    """Pinhole intrinsics in pixels."""
 
-    @property
-    def fx(self) -> float:
-        return (self.width / 2.0) / math.tan(math.radians(self.hfov_deg) / 2.0)
+    fx: float
+    fy: float
+    cx: float
+    cy: float
 
-    @property
-    def fy(self) -> float:
-        return self.fx  # square pixels; re-derive from a checkerboard calibration
+    @classmethod
+    def from_fov(cls, width: int, height: int, hfov_deg: float) -> "Camera":
+        fx = width / (2.0 * math.tan(math.radians(hfov_deg) / 2.0))
+        return cls(fx, fx, width / 2.0, height / 2.0)
+
+    def ray(self, u: float, v: float) -> np.ndarray:
+        """Unit direction in camera frame through pixel (u, v)."""
+        d = np.array([(u - self.cx) / self.fx, (v - self.cy) / self.fy, 1.0])
+        return d / np.linalg.norm(d)
 
 
-@dataclass
+@dataclass(frozen=True)
 class Pose:
-    """Drone pose from the VIO / SLAM front-end, interpolated to the frame timestamp."""
+    """Camera position in world metres and camera->world rotation."""
 
-    x: float
-    y: float
-    z: float  # height above the floor plane, metres
-    yaw: float  # radians
-    pitch: float = 0.0  # radians, nose-down positive
-    t: float = 0.0  # frame timestamp, seconds
+    position: np.ndarray
+    rotation: np.ndarray = field(default_factory=lambda: NADIR.copy())
+
+    @classmethod
+    def from_euler(cls, x: float, y: float, z: float, yaw: float = 0.0,
+                   pitch: float = 0.0, roll: float = 0.0) -> "Pose":
+        """Angles in radians. pitch tilts the camera up from straight down."""
+        cy_, sy = math.cos(yaw), math.sin(yaw)
+        cp, sp = math.cos(pitch), math.sin(pitch)
+        cr, sr = math.cos(roll), math.sin(roll)
+        rz = np.array([[cy_, -sy, 0.0], [sy, cy_, 0.0], [0.0, 0.0, 1.0]])
+        rx = np.array([[1.0, 0.0, 0.0], [0.0, cp, -sp], [0.0, sp, cp]])
+        ry = np.array([[cr, 0.0, sr], [0.0, 1.0, 0.0], [-sr, 0.0, cr]])
+        return cls(np.asarray([x, y, z], dtype=float), rz @ NADIR @ rx @ ry)
 
 
-@dataclass
-class Arena:
-    size: float = 15.0  # arena is at most 15 m x 15 m
-    cell: float = 1.0  # grid box side; set to 2.0 to label by room instead
+def locate(camera: Camera, pose: Pose, u: float, v: float) -> np.ndarray | None:
+    """Floor point (x, y, 0) seen at pixel (u, v), or None if the ray misses it.
 
-
-def ray_to_floor(
-    cam: Camera, pose: Pose, u: float, v: float, floor_z: float = 0.0
-) -> Optional[Tuple[float, float]]:
-    """Intersect the ray through pixel (u, v) with the floor plane.
-
-    Returns world (x, y) in metres, or None if the ray does not point downward
-    (target above the horizon - a detection on a wall, or a bad pose).
+    A ray that points level or upward never meets the floor, and one that meets
+    it far behind the drone is a numerically meaningless grazing hit; both are
+    rejected rather than reported as a position.
     """
-    xr = (u - cam.width / 2.0) / cam.fx
-    yd = (v - cam.height / 2.0) / cam.fy
-    theta = math.radians(cam.mount_pitch_deg) + pose.pitch
-    ct, st = math.cos(theta), math.sin(theta)
-    cy, sy = math.cos(pose.yaw), math.sin(pose.yaw)
-
-    # optical axis (forward, tilted down by theta) and the camera's down axis
-    fwd = (cy * ct, sy * ct, -st)
-    down = (-cy * st, -sy * st, -ct)
-    right = (sy, -cy, 0.0)
-
-    ray = tuple(xr * right[i] + yd * down[i] + fwd[i] for i in range(3))
-    if ray[2] >= -1e-6:
+    direction = pose.rotation @ camera.ray(u, v)
+    if direction[2] > -1e-3 or pose.position[2] <= 0.0:
         return None
-    scale = (pose.z - floor_z) / -ray[2]
-    return pose.x + scale * ray[0], pose.y + scale * ray[1]
+    distance = -pose.position[2] / direction[2]
+    return pose.position + distance * direction
 
 
-def locate(
-    cam: Camera, pose: Pose, box: Tuple[float, float, float, float]
-) -> Optional[Tuple[float, float]]:
-    """World floor position of a detection, from the bottom-centre of its box."""
-    x1, y1, x2, y2 = box
-    return ray_to_floor(cam, pose, (x1 + x2) / 2.0, y2)
+@dataclass(frozen=True)
+class Arena:
+    """Square arena split into a letter x number grid. A1 is the origin corner."""
+
+    size: float = 15.0
+    divisions: int = 5
+
+    @property
+    def cell(self) -> float:
+        return self.size / self.divisions
+
+    def contains(self, point) -> bool:
+        return 0.0 <= point[0] <= self.size and 0.0 <= point[1] <= self.size
 
 
-def grid_cell(x: float, y: float, arena: Arena = Arena()) -> str:
-    """World metres -> grid label, e.g. 'D4'. Columns are letters along X."""
-    n = max(1, int(round(arena.size / arena.cell)))
-    col = min(n - 1, max(0, int(x // arena.cell)))
-    row = min(n - 1, max(0, int(y // arena.cell)))
+def grid_cell(arena: Arena, point) -> str | None:
+    """'B3' for a floor point, or None if it fell outside the arena."""
+    if not arena.contains(point):
+        return None
+    col = min(int(point[0] / arena.cell), arena.divisions - 1)
+    row = min(int(point[1] / arena.cell), arena.divisions - 1)
     return f"{chr(ord('A') + col)}{row + 1}"
 
 
-@dataclass
-class Survivor:
-    id: int
-    x: float
-    y: float
-    conf: float
-    hits: int = 1
-    committed: bool = False
-
-
-@dataclass
 class SurvivorRegistry:
-    """Merges repeated sightings of one survivor and caps the reported count.
+    """Deduplicates sightings into at most `capacity` survivor positions.
 
-    A survivor seen from three viewpoints must be reported once, at one grid box.
-    Merging happens in world coordinates, not image space, because the same
-    person seen from a different heading has no image-space overlap at all.
+    The same person is seen from several headings on a survey pass, so raw
+    detections must be merged by proximity or the count inflates. Merging keeps a
+    running mean of the position - later sightings from closer range pull the
+    estimate in without discarding the earlier evidence.
     """
 
-    merge_radius: float = 1.0  # metres; roughly one grid cell
-    min_hits: int = 2  # sightings before a survivor is committed to the map
-    max_count: int = 6  # the brief places at most 6 survivors
-    arena: Arena = field(default_factory=Arena)
-    survivors: List[Survivor] = field(default_factory=list)
-    _next_id: int = 1
+    def __init__(self, arena: Arena | None = None, radius: float = 1.5,
+                 capacity: int = 6):
+        self.arena = arena or Arena()
+        self.radius = radius
+        self.capacity = capacity
+        self.survivors: list[dict] = []
 
-    # ponytail: first-come commit, no eviction. A false positive that reaches
-    # min_hits holds its slot. Add confidence-ranked eviction only if field
-    # testing shows the registry filling with clutter before the real targets.
-    def add(self, x: float, y: float, conf: float) -> Optional[Dict]:
-        """Record a sighting. Returns an event dict when a survivor is newly committed."""
-        near, best = None, self.merge_radius
-        for s in self.survivors:
-            d = math.hypot(s.x - x, s.y - y)
-            if d <= best:
-                near, best = s, d
-        if near is None:
-            near = Survivor(self._next_id, x, y, conf)
-            self._next_id += 1
-            self.survivors.append(near)
-        else:
-            w = 1.0 / (near.hits + 1)
-            near.x += (x - near.x) * w
-            near.y += (y - near.y) * w
-            near.conf = max(near.conf, conf)
-            near.hits += 1
+    def add(self, point, confidence: float = 1.0) -> dict | None:
+        point = np.asarray(point, dtype=float)[:2]
+        if not self.arena.contains(point):
+            return None
+        for survivor in self.survivors:
+            if np.linalg.norm(survivor["position"] - point) <= self.radius:
+                n = survivor["sightings"] + 1
+                survivor["position"] += (point - survivor["position"]) / n
+                survivor["sightings"] = n
+                survivor["confidence"] = max(survivor["confidence"], confidence)
+                survivor["cell"] = grid_cell(self.arena, survivor["position"])
+                return survivor
 
-        committed = sum(1 for s in self.survivors if s.committed)
-        if not near.committed and near.hits >= self.min_hits and committed < self.max_count:
-            near.committed = True
-            return self.event(near)
-        return None
+        if len(self.survivors) >= self.capacity:
+            weakest = min(self.survivors, key=lambda s: s["confidence"])
+            if weakest["confidence"] >= confidence:
+                return None
+            self.survivors.remove(weakest)
 
-    def event(self, s: Survivor) -> Dict:
-        return {
-            "survivor_id": s.id,
-            "x": round(s.x, 2),
-            "y": round(s.y, 2),
-            "cell": grid_cell(s.x, s.y, self.arena),
-            "confidence": round(s.conf, 3),
-            "sightings": s.hits,
-        }
+        survivor = {"id": len(self.survivors), "position": point, "sightings": 1,
+                    "confidence": confidence, "cell": grid_cell(self.arena, point)}
+        self.survivors.append(survivor)
+        return survivor
 
-    def committed(self) -> List[Dict]:
-        return [self.event(s) for s in self.survivors if s.committed]
+    def report(self) -> list[dict]:
+        return [{"id": s["id"], "cell": s["cell"], "sightings": s["sightings"],
+                 "confidence": round(s["confidence"], 3),
+                 "position": [round(float(c), 2) for c in s["position"]]}
+                for s in sorted(self.survivors, key=lambda s: -s["confidence"])]
+
+
+def _demo():
+    cam = Camera.from_fov(640, 480, 70.0)
+    arena = Arena()
+
+    # nadir at 4 m: the principal point must land directly under the drone
+    pose = Pose.from_euler(7.5, 7.5, 4.0)
+    point = locate(cam, pose, 320, 240)
+    assert np.allclose(point, [7.5, 7.5, 0.0], atol=1e-6), point
+    assert grid_cell(arena, point) == "C3"
+
+    # a pixel right of centre must land east of the drone, and the offset must
+    # scale with altitude - that is the projection working, not a constant.
+    right = locate(cam, pose, 480, 240)
+    assert right[0] > point[0] and abs(right[1] - point[1]) < 1e-6
+    high = locate(cam, Pose.from_euler(7.5, 7.5, 8.0), 480, 240)
+    assert abs((high[0] - 7.5) - 2 * (right[0] - 7.5)) < 1e-6
+
+    # yaw 90 deg turns that eastward offset into a northward one
+    turned = locate(cam, Pose.from_euler(7.5, 7.5, 4.0, yaw=math.pi / 2), 480, 240)
+    assert abs(turned[0] - 7.5) < 1e-6 and turned[1] > 7.5
+
+    # rays that cannot meet the floor are refused, not extrapolated
+    assert locate(cam, Pose.from_euler(7.5, 7.5, 4.0, pitch=math.pi / 2), 320, 240) is None
+    assert grid_cell(arena, [16.0, 2.0]) is None
+    assert grid_cell(arena, [0.0, 0.0]) == "A1"
+    assert grid_cell(arena, [14.9, 14.9]) == "E5"
+
+    # one survivor seen twice from 0.4 m apart is one survivor, not two
+    reg = SurvivorRegistry(arena)
+    reg.add([3.0, 3.0], 0.7)
+    reg.add([3.4, 3.0], 0.9)
+    assert len(reg.survivors) == 1
+    assert reg.survivors[0]["sightings"] == 2
+    assert reg.survivors[0]["confidence"] == 0.9
+    assert abs(reg.survivors[0]["position"][0] - 3.2) < 1e-6
+    reg.add([12.0, 12.0], 0.8)
+    assert len(reg.survivors) == 2
+
+    # the cap holds, and only a stronger sighting may displace a weaker one
+    reg = SurvivorRegistry(arena, radius=0.5, capacity=2)
+    reg.add([1.0, 1.0], 0.9)
+    reg.add([5.0, 5.0], 0.4)
+    assert reg.add([9.0, 9.0], 0.3) is None
+    assert reg.add([9.0, 9.0], 0.8) is not None
+    assert len(reg.survivors) == 2
+    assert {s["cell"] for s in reg.survivors} == {"A1", "D4"}
+    print(f"ok: nadir {grid_cell(arena, point)}, report {reg.report()[0]['cell']}")
+
+
+if __name__ == "__main__":
+    _demo()

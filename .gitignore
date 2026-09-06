@@ -1,5 +1,8 @@
 __pycache__/
 *.pt
 *.mp4
+*.npz
 data/
+dataset/
 events.jsonl
+survivors.json

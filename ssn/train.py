@@ -1,142 +1,208 @@
-"""Train the SSN verifier on harvested crop sequences.
+"""Train the SSN verifier and score it the way the mission is scored.
 
-The metric that matters is not accuracy. The verifier exists to cut the
-proposer's false positives without giving up recall, so the final report
-compares both at *matched recall*: threshold the raw proposer confidence until
-its recall equals the SSN's, then count the false positives each one lets
-through. That number is the competition claim, and it is the Gate B decision.
+Accuracy is the wrong objective here and would be actively misleading: the
+harvested windows are mostly negatives, so a network that answers "no survivor"
+to everything scores well and is worthless. What the mission cares about is a
+different trade: the proposer already found every survivor it is going to find,
+so the verifier's job is to throw away false positives *without* throwing away
+survivors.
+
+So the reported metric is false-positive reduction at matched recall. Pick the
+threshold where the network still keeps `target_recall` of the true survivors,
+then ask how many of the proposer's false positives it removed at that setting.
+Gate B asks for at least a 30% reduction. Recall is held near 1.0 rather than
+traded off, because a missed survivor in a collapsed building is not a metric.
 """
 
 from __future__ import annotations
 
 import argparse
-import time
-from typing import Dict, List
+from pathlib import Path
 
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, TensorDataset, random_split
 
-from .data import split
+from .data import SequenceDataset, synthetic
 from .model import SSN
 
-
-def metrics(scores: np.ndarray, labels: np.ndarray, thresh: float) -> Dict[str, float]:
-    pred = scores >= thresh
-    tp = float(np.sum(pred & (labels == 1)))
-    fp = float(np.sum(pred & (labels == 0)))
-    fn = float(np.sum(~pred & (labels == 1)))
-    recall = tp / max(1.0, tp + fn)
-    precision = tp / max(1.0, tp + fp)
-    return {
-        "recall": recall,
-        "precision": precision,
-        "f1": 2 * precision * recall / max(1e-9, precision + recall),
-        "fp": fp,
-    }
+TARGET_RECALL = 0.98
+GATE_B_REDUCTION = 0.30
 
 
-def fp_at_recall(scores: np.ndarray, labels: np.ndarray, target_recall: float) -> float:
-    """Lowest false-positive count achievable at >= target_recall."""
-    best = float(np.sum(labels == 0))
-    for t in np.unique(scores):
-        m = metrics(scores, labels, t)
-        if m["recall"] >= target_recall:
-            best = min(best, m["fp"])
+def matched_recall(scores, labels, target_recall: float = TARGET_RECALL) -> dict:
+    """False positives removed at the threshold that preserves target recall.
+
+    The baseline is the proposer alone, which accepts every candidate: its recall
+    is 1.0 and its false positives are every negative in the set. Sweeping the
+    threshold over observed scores avoids assuming any particular calibration -
+    an untrained network's scores sit in a narrow band and a fixed 0.5 would
+    report nonsense.
+    """
+    scores = np.asarray(scores, dtype=float)
+    labels = np.asarray(labels, dtype=float)
+    positives, negatives = labels.sum(), (1.0 - labels).sum()
+    if positives == 0 or negatives == 0:
+        return {"threshold": 0.0, "recall": float("nan"), "fp_reduction": 0.0,
+                "fp_kept": int(negatives), "fp_baseline": int(negatives)}
+
+    # highest threshold that still keeps target_recall of the survivors
+    best = {"threshold": float(scores.min()), "recall": 1.0, "fp_reduction": 0.0,
+            "fp_kept": int(negatives), "fp_baseline": int(negatives)}
+    for threshold in np.unique(scores):
+        kept = scores >= threshold
+        recall = float((kept & (labels > 0)).sum() / positives)
+        if recall < target_recall:
+            continue
+        fp_kept = int((kept & (labels == 0)).sum())
+        candidate = {"threshold": float(threshold), "recall": recall,
+                     "fp_reduction": 1.0 - fp_kept / negatives,
+                     "fp_kept": fp_kept, "fp_baseline": int(negatives)}
+        if candidate["fp_reduction"] >= best["fp_reduction"]:
+            best = candidate
     return best
 
 
 @torch.no_grad()
-def evaluate(model: SSN, loader: DataLoader) -> tuple:
+def evaluate(model: SSN, loader) -> dict:
     model.eval()
-    scores: List[float] = []
-    labels: List[float] = []
+    scores, labels = [], []
     for x, y in loader:
-        scores += torch.sigmoid(model(x)).tolist()
-        labels += y.tolist()
-    return np.array(scores), np.array(labels)
+        scores.append(torch.sigmoid(model(x.float())).cpu().numpy())
+        labels.append(y.cpu().numpy())
+    if not scores:
+        return matched_recall([], [])
+    return matched_recall(np.concatenate(scores), np.concatenate(labels))
 
 
-def train(
-    data: str,
-    out: str = "ssn.pt",
-    epochs: int = 30,
-    batch: int = 32,
-    lr: float = 3e-3,
-    val_frac: float = 0.2,
-    thresh: float = 0.6,
-    seed: int = 0,
-) -> Dict[str, float]:
-    torch.manual_seed(seed)
-    train_set, val_set = split(data, val_frac, seed)
-    train_ld = DataLoader(train_set, batch_size=batch, shuffle=True, drop_last=False)
-    val_ld = DataLoader(val_set, batch_size=batch)
+def train(model: SSN, train_loader, val_loader, epochs: int = 10,
+          lr: float = 2e-3, pos_weight: float | None = None,
+          checkpoint: str | None = None, verbose: bool = True) -> dict:
+    """Returns the best validation metrics seen, and writes the best checkpoint."""
+    weight = (torch.tensor([float(pos_weight)]) if pos_weight else None)
+    criterion = nn.BCEWithLogitsLoss(pos_weight=weight)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
-    labels = train_set.dataset.labels()[list(train_set.indices)]
-    pos = max(1, int(labels.sum()))
-    pos_weight = torch.tensor(float(len(labels) - pos) / pos)
-    print(f"train {len(train_set)} / val {len(val_set)} sequences, pos_weight {pos_weight:.2f}")
-
-    model = SSN()
-    print(f"SSN parameters: {model.num_params()}")
-    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
-    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, epochs)
-    lossf = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-
-    best = -1.0
-    for epoch in range(1, epochs + 1):
+    history, best = [], {"fp_reduction": -1.0}
+    for epoch in range(epochs):
         model.train()
-        total, n, t0 = 0.0, 0, time.perf_counter()
-        for x, y in train_ld:
-            opt.zero_grad(set_to_none=True)
-            loss = lossf(model(x), y)
+        total, seen = 0.0, 0
+        for x, y in train_loader:
+            optimizer.zero_grad()
+            loss = criterion(model(x.float()), y.float())
             loss.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), 5.0)
-            opt.step()
-            total += float(loss) * len(y)
-            n += len(y)
-        sched.step()
-        scores, ys = evaluate(model, val_ld)
-        m = metrics(scores, ys, thresh)
-        print(
-            f"epoch {epoch:3d}  loss {total / max(1, n):.4f}  "
-            f"val recall {m['recall']:.3f}  precision {m['precision']:.3f}  "
-            f"f1 {m['f1']:.3f}  spike_rate {model.last_spike_rate:.3f}  "
-            f"{time.perf_counter() - t0:.1f}s"
-        )
-        if m["f1"] > best:
-            best = m["f1"]
-            model.save(out)
+            optimizer.step()
+            total += float(loss.detach()) * len(y)
+            seen += len(y)
 
-    # Gate B report: SSN vs raw proposer confidence at matched recall.
-    model = SSN.load(out)
-    scores, ys = evaluate(model, val_ld)
-    ssn_m = metrics(scores, ys, thresh)
-    prop = np.array(
-        [float(np.load(val_set.dataset.files[i])["proposer_conf"]) for i in val_set.indices]
-    )
-    base_fp = fp_at_recall(prop, ys, ssn_m["recall"])
-    cut = 100.0 * (1 - ssn_m["fp"] / max(1.0, base_fp))
-    print(
-        f"\nGate B  recall {ssn_m['recall']:.3f}  "
-        f"false positives: proposer {base_fp:.0f} -> SSN {ssn_m['fp']:.0f}  "
-        f"({cut:.0f}% cut; gate is >= 30%)"
-    )
-    return {"f1": best, "recall": ssn_m["recall"], "fp_cut_pct": cut}
+        metrics = evaluate(model, val_loader)
+        metrics["loss"] = total / max(seen, 1)
+        metrics["epoch"] = epoch
+        metrics["spike_rate"] = model.last_spike_rate
+        history.append(metrics)
+        if metrics["fp_reduction"] > best["fp_reduction"]:
+            best = metrics
+            if checkpoint:
+                model.save(checkpoint)
+        if verbose:
+            print(f"epoch {epoch:3d}  loss {metrics['loss']:.4f}  "
+                  f"recall {metrics['recall']:.3f}  "
+                  f"fp-reduction {metrics['fp_reduction'] * 100:5.1f}%  "
+                  f"spikes {metrics['spike_rate']:.3f}")
+    best["history"] = history
+    return best
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(description="train the SSN survivor verifier")
-    ap.add_argument("--data", default="data/seqs")
-    ap.add_argument("--out", default="ssn.pt")
-    ap.add_argument("--epochs", type=int, default=30)
-    ap.add_argument("--batch", type=int, default=32)
-    ap.add_argument("--lr", type=float, default=3e-3)
-    ap.add_argument("--thresh", type=float, default=0.6)
-    args = ap.parse_args()
-    train(args.data, args.out, args.epochs, args.batch, args.lr, thresh=args.thresh)
+def _loaders(dataset, batch_size: int, val_fraction: float = 0.2, seed: int = 0):
+    val_size = max(1, int(len(dataset) * val_fraction))
+    train_set, val_set = random_split(
+        dataset, [len(dataset) - val_size, val_size],
+        generator=torch.Generator().manual_seed(seed))
+    return (DataLoader(train_set, batch_size=batch_size, shuffle=True),
+            DataLoader(val_set, batch_size=batch_size))
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description="train the SSN verifier")
+    parser.add_argument("--data", default=None,
+                        help="directory of harvested .npz windows")
+    parser.add_argument("--synthetic", type=int, default=0,
+                        help="train on N synthetic windows instead (smoke test only)")
+    parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--lr", type=float, default=2e-3)
+    parser.add_argument("--out", default="ssn.pt")
+    args = parser.parse_args(argv)
+
+    if args.synthetic:
+        x, y = synthetic(args.synthetic)
+        dataset = TensorDataset(torch.from_numpy(x), torch.from_numpy(y))
+        pos_weight = float((y == 0).sum() / max((y == 1).sum(), 1))
+        print(f"synthetic run on {args.synthetic} windows - proves the loop "
+              f"trains, says nothing about mission performance")
+    elif args.data:
+        dataset = SequenceDataset(args.data)
+        labels = dataset.labels()
+        pos_weight = float((labels == 0).sum() / max((labels == 1).sum(), 1))
+        print(f"{len(dataset)} windows, {int(labels.sum())} positive, "
+              f"pos_weight {pos_weight:.1f}")
+    else:
+        parser.error("pass --data DIR (harvested windows) or --synthetic N")
+
+    train_loader, val_loader = _loaders(dataset, args.batch_size)
+    model = SSN()
+    best = train(model, train_loader, val_loader, args.epochs, args.lr,
+                 pos_weight, checkpoint=args.out)
+
+    reduction = best["fp_reduction"]
+    print(f"\nbest: {reduction * 100:.1f}% false positives removed at "
+          f"{best['recall'] * 100:.1f}% recall (threshold {best['threshold']:.3f})")
+    print(f"kept {best['fp_kept']} of {best['fp_baseline']} proposer false positives")
+    if args.synthetic:
+        print("Gate B is not assessable on synthetic data - needs flight footage.")
+    elif reduction >= GATE_B_REDUCTION:
+        print(f"Gate B PASS (>= {GATE_B_REDUCTION * 100:.0f}%). Checkpoint: {args.out}")
+    else:
+        print(f"Gate B FAIL (< {GATE_B_REDUCTION * 100:.0f}%). More or harder data needed.")
+    return 0
+
+
+def _demo():
+    # the metric must be right before any training result means anything
+    labels = np.array([1, 1, 1, 1, 0, 0, 0, 0], dtype=float)
+    perfect = np.array([0.9, 0.9, 0.9, 0.9, 0.1, 0.1, 0.1, 0.1])
+    result = matched_recall(perfect, labels)
+    assert result["recall"] >= TARGET_RECALL
+    assert result["fp_reduction"] == 1.0, result
+
+    useless = np.array([0.5] * 8)  # cannot separate: no false positive is removable
+    assert matched_recall(useless, labels)["fp_reduction"] == 0.0
+
+    # half the negatives separable -> exactly half removed, recall untouched
+    partial = np.array([0.9, 0.9, 0.9, 0.9, 0.1, 0.1, 0.9, 0.9])
+    half = matched_recall(partial, labels)
+    assert abs(half["fp_reduction"] - 0.5) < 1e-9, half
+    assert half["recall"] == 1.0
+
+    # a threshold that would gain FP reduction by dropping survivors is refused
+    greedy = np.array([0.1, 0.9, 0.9, 0.9, 0.2, 0.2, 0.2, 0.2])
+    assert matched_recall(greedy, labels)["recall"] >= TARGET_RECALL
+    assert matched_recall(greedy, labels)["fp_reduction"] == 0.0
+
+    # and the loop itself must actually learn the persistent-vs-flash task
+    torch.manual_seed(0)
+    x, y = synthetic(96, np.random.default_rng(0))
+    dataset = TensorDataset(torch.from_numpy(x), torch.from_numpy(y))
+    train_loader, val_loader = _loaders(dataset, batch_size=16)
+    model = SSN()
+    before = evaluate(model, val_loader)["fp_reduction"]
+    best = train(model, train_loader, val_loader, epochs=4, verbose=False)
+    assert best["history"][-1]["loss"] < best["history"][0]["loss"], "loss did not fall"
+    assert best["fp_reduction"] > before, (before, best["fp_reduction"])
+    print(f"ok: metric verified, fp-reduction {before:.2f} -> "
+          f"{best['fp_reduction']:.2f} after 4 epochs")
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -1,205 +1,180 @@
-"""Mission runtime: video in, survivor grid tags out.
+"""Mission runtime: video in, survivor grid events out.
 
-    python -m ssn.run --source 0 --ssn ssn.pt --pose-file pose.jsonl --out events.jsonl
+Wires the three stages together - propose/track/verify, then project the verified
+box onto the floor and merge it into the registry - and writes one JSON document
+of what was found and where.
 
-Emits one JSON line per newly committed survivor, on stdout and to --out, for the
-Ground Control Station to draw on the map. Everything here runs onboard; the GCS
-is a consumer of this stream, not a participant in the decision.
+Pose is injected, not solved here. There is no SLAM in this package; the flight
+build supplies a callable that answers "where was the camera at time t" and the
+default is a fixed hover pose, which is only honest for bench footage from a
+stationary camera. Feeding real flight video through the default pose will
+produce confident, wrong grid cells.
 """
 
 from __future__ import annotations
 
 import argparse
-import bisect
 import json
 import sys
-import time
-from dataclasses import asdict
-from pathlib import Path
-from typing import List, Optional
+from dataclasses import dataclass
 
 import cv2
 
-from .localize import Arena, Camera, Pose, SurvivorRegistry, grid_cell, locate
-from .perception import Proposer, Tracker, Verifier
+from .localize import Arena, Camera, Pose, SurvivorRegistry, locate
+from .perception import Pipeline, Proposer, Tracker, Verifier
+from .model import SSN
 
 
-class PoseSource:
-    """Drone pose, interpolated to the frame time.
+@dataclass
+class Mission:
+    camera: Camera
+    arena: Arena
+    pipeline: Pipeline
+    registry: SurvivorRegistry
+    pose_at: object  # callable: seconds -> Pose
 
-    Reads a JSONL log for bench replay. Onboard, replace `at()` with a MAVLink
-    LOCAL_POSITION_NED + ATTITUDE read from the flight controller - the rest of
-    the pipeline does not care where the pose came from, only that it is
-    timestamped against the frame.
-    """
-
-    def __init__(self, path: Optional[str], default_z: float = 1.3):
-        self.default_z = default_z
-        self.times: List[float] = []
-        self.poses: List[Pose] = []
-        if path:
-            for line in Path(path).read_text().splitlines():
-                if not line.strip():
-                    continue
-                d = json.loads(line)
-                self.times.append(float(d["t"]))
-                self.poses.append(
-                    Pose(
-                        float(d["x"]),
-                        float(d["y"]),
-                        float(d.get("z", default_z)),
-                        float(d["yaw"]),
-                        float(d.get("pitch", 0.0)),
-                        float(d["t"]),
-                    )
-                )
-
-    def at(self, t: float) -> Pose:
-        if not self.poses:
-            return Pose(0.0, 0.0, self.default_z, 0.0, 0.0, t)
-        i = min(len(self.poses) - 1, bisect.bisect_left(self.times, t))
-        if i and abs(self.times[i - 1] - t) < abs(self.times[i] - t):
-            i -= 1
-        return self.poses[i]
+    def step(self, frame, timestamp: float) -> list[dict]:
+        events = []
+        pose = self.pose_at(timestamp)
+        for track in self.pipeline.step(frame):
+            # floor contact is at the bottom edge of the box, not its centre -
+            # projecting the centre puts a standing person half a body too far.
+            u = (track.box[0] + track.box[2]) / 2.0
+            point = locate(self.camera, pose, u, track.box[3])
+            if point is None:
+                continue
+            survivor = self.registry.add(point, track.confidence)
+            if survivor is None:
+                continue
+            events.append({"t": round(timestamp, 3), "track": track.id,
+                           "survivor": survivor["id"], "cell": survivor["cell"],
+                           "confidence": round(track.confidence, 3)})
+        return events
 
 
-def draw(frame, tracks, cam, pose, arena):
-    for tr in tracks:
-        x1, y1, x2, y2 = (int(v) for v in tr.box)
-        hot = tr.ssn_conf >= 0.6
-        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 220, 0) if hot else (60, 60, 200), 2)
-        p = locate(cam, pose, tr.box)
-        cell = grid_cell(*p, arena) if p else "--"
-        cv2.putText(
-            frame,
-            f"#{tr.id} ssn {tr.ssn_conf:.2f} {cell}",
-            (x1, max(14, y1 - 6)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.45,
-            (255, 255, 255),
-            1,
-            cv2.LINE_AA,
-        )
-    return frame
-
-
-def main() -> None:
-    ap = argparse.ArgumentParser(description="SSN indoor survivor detection runtime")
-    ap.add_argument("--source", default="0", help="camera index or video path")
-    ap.add_argument("--weights", default="yolov8n.pt", help="proposer weights")
-    ap.add_argument("--ssn", default=None, help="trained SSN checkpoint")
-    ap.add_argument("--pose-file", default=None, help="JSONL pose log for replay")
-    ap.add_argument("--out", default=None, help="write survivor events here")
-    ap.add_argument("--record", default=None, help="save the flight video for harvesting")
-    ap.add_argument("--hz", type=float, default=3.0, help="perception rate")
-    ap.add_argument("--thresh", type=float, default=0.6, help="SSN confirm threshold")
-    ap.add_argument("--conf", type=float, default=0.15, help="proposer confidence")
-    ap.add_argument("--imgsz", type=int, default=416)
-    ap.add_argument("--cell", type=float, default=1.0, help="grid box side, metres")
-    ap.add_argument("--hfov", type=float, default=70.0)
-    ap.add_argument("--mount-pitch", type=float, default=20.0, help="camera down-tilt, degrees")
-    ap.add_argument("--max-survivors", type=int, default=6)
-    ap.add_argument("--show", action="store_true", help="dev preview window")
-    ap.add_argument("--status", action="store_true", help="emit a status line per frame")
-    args = ap.parse_args()
-
-    source = int(args.source) if args.source.isdigit() else args.source
-    cap = cv2.VideoCapture(source)
-    if not cap.isOpened():
-        raise SystemExit(f"cannot open source {args.source}")
-    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 640
-    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 480
-
-    cam = Camera(w, h, args.hfov, args.mount_pitch)
-    arena = Arena(cell=args.cell)
-    poses = PoseSource(args.pose_file)
-    prop = Proposer(args.weights, conf=args.conf, imgsz=args.imgsz)
-    tracker = Tracker()
-    verifier = Verifier(args.ssn, thresh=args.thresh)
-    registry = SurvivorRegistry(arena=arena, max_count=args.max_survivors)
-    if not verifier.trained:
-        print("WARNING: SSN is untrained (random weights) - verification is meaningless",
-              file=sys.stderr)
-
-    writer = None
-    if args.record:
-        writer = cv2.VideoWriter(
-            args.record, cv2.VideoWriter_fourcc(*"mp4v"), args.hz, (w, h)
-        )
-    events = open(args.out, "a", buffering=1) if args.out else None
-    period = 1.0 / max(0.1, args.hz)
-    start = time.perf_counter()
-    frames = 0
-
-    try:
-        while True:
-            t0 = time.perf_counter()
-            ok, frame = cap.read()
-            if not ok:
-                break
-            frames += 1
-            now = t0 - start
-            pose = poses.at(now)
-
-            tracks = tracker.update(frame, prop(frame))
-            for track in verifier(tracks):
-                point = locate(cam, pose, track.box)
-                if point is None:
-                    continue
-                event = registry.add(*point, track.ssn_conf)
-                if event:
-                    event["t"] = round(now, 2)
-                    line = json.dumps(event)
-                    print(line, flush=True)
-                    if events:
-                        events.write(line + "\n")
-
-            if args.status:
-                print(
-                    json.dumps(
-                        {
-                            "status": "flying",
-                            "t": round(now, 2),
-                            "pose": {k: round(v, 2) for k, v in asdict(pose).items()},
-                            "cell": grid_cell(pose.x, pose.y, arena),
-                            "tracks": len(tracks),
-                            "survivors": len(registry.committed()),
-                            "ms": round((time.perf_counter() - t0) * 1000, 1),
-                        }
-                    ),
-                    flush=True,
-                )
-            if writer:
-                writer.write(frame)
-            if args.show:
-                cv2.imshow("ssn", draw(frame, tracks, cam, pose, arena))
-                if cv2.waitKey(1) & 0xFF == 27:
-                    break
-
-            lag = period - (time.perf_counter() - t0)
-            if lag > 0:
-                time.sleep(lag)
-    finally:
-        cap.release()
-        if writer:
-            writer.release()
-        if events:
-            events.close()
-        if args.show:
-            cv2.destroyAllWindows()  # headless OpenCV builds raise here
-
-    print(
-        json.dumps(
-            {
-                "status": "complete",
-                "frames": frames,
-                "seconds": round(time.perf_counter() - start, 1),
-                "survivors": registry.committed(),
-            }
-        ),
-        flush=True,
+def build(width: int, height: int, hfov: float = 70.0, altitude: float = 3.0,
+          weights: str | None = None, threshold: float = 0.5) -> Mission:
+    model = SSN.load(weights) if weights else SSN()
+    arena = Arena()
+    hover = Pose.from_euler(arena.size / 2, arena.size / 2, altitude)
+    return Mission(
+        camera=Camera.from_fov(width, height, hfov),
+        arena=arena,
+        pipeline=Pipeline(Proposer(), Tracker(), Verifier(model, threshold)),
+        registry=SurvivorRegistry(arena),
+        pose_at=lambda _t: hover,
     )
 
 
+def run(source, out_path: str | None = None, max_frames: int = 0,
+        mission: Mission | None = None, show: bool = False) -> dict:
+    capture = cv2.VideoCapture(int(source) if str(source).isdigit() else str(source))
+    if not capture.isOpened():
+        raise SystemExit(f"cannot open video source: {source}")
+    fps = capture.get(cv2.CAP_PROP_FPS) or 30.0
+    width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH)) or 640
+    height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 480
+    mission = mission or build(width, height)
+
+    events, index = [], 0
+    try:
+        while True:
+            ok, frame = capture.read()
+            if not ok or (max_frames and index >= max_frames):
+                break
+            events.extend(mission.step(frame, index / fps))
+            index += 1
+            if show:
+                cv2.imshow("ssn", frame)
+                if cv2.waitKey(1) & 0xFF == 27:
+                    break
+    finally:
+        capture.release()
+        if show:
+            # destroyAllWindows raises on headless builds with no GUI backend
+            try:
+                cv2.destroyAllWindows()
+            except cv2.error:
+                pass
+
+    report = {"frames": index, "events": events,
+              "survivors": mission.registry.report()}
+    if out_path:
+        with open(out_path, "w", encoding="utf-8") as handle:
+            json.dump(report, handle, indent=2)
+    return report
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description="run the SSN mission pipeline")
+    parser.add_argument("source", help="video file path, or a webcam index")
+    parser.add_argument("--out", default="survivors.json")
+    parser.add_argument("--weights", default=None, help="trained SSN checkpoint")
+    parser.add_argument("--max-frames", type=int, default=0)
+    parser.add_argument("--altitude", type=float, default=3.0)
+    parser.add_argument("--hfov", type=float, default=70.0)
+    parser.add_argument("--threshold", type=float, default=0.5)
+    parser.add_argument("--show", action="store_true")
+    args = parser.parse_args(argv)
+
+    if args.weights is None:
+        print("warning: untrained SSN - verification output is meaningless",
+              file=sys.stderr)
+    capture = cv2.VideoCapture(int(args.source) if args.source.isdigit()
+                               else args.source)
+    width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH)) or 640
+    height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 480
+    capture.release()
+
+    mission = build(width, height, args.hfov, args.altitude, args.weights,
+                    args.threshold)
+    report = run(args.source, args.out, args.max_frames, mission)
+    print(f"{report['frames']} frames, {len(report['events'])} events, "
+          f"{len(report['survivors'])} survivors -> {args.out}")
+    for survivor in report["survivors"]:
+        print(f"  survivor {survivor['id']}: cell {survivor['cell']} "
+              f"conf {survivor['confidence']} ({survivor['sightings']} sightings)")
+    return 0
+
+
+def _demo():
+    import tempfile
+    from pathlib import Path
+
+    import numpy as np
+
+    from .model import T_STEPS
+
+    tmp = Path(tempfile.mkdtemp())
+    path = tmp / "clip.mp4"
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), 30.0,
+                             (320, 240))
+    rng = np.random.default_rng(0)
+    for step in range(T_STEPS + 4):
+        frame = rng.integers(0, 60, (240, 320, 3), dtype=np.uint8)
+        cv2.rectangle(frame, (140 + step, 100), (180 + step, 190), (220, 220, 220), -1)
+        writer.write(frame)
+    writer.release()
+
+    # a stub proposer keeps the check offline - YOLO weights are not the subject
+    box_seen = [(140.0, 100.0, 180.0, 190.0)]
+    stub = type("Stub", (), {"__call__": lambda self, frame: box_seen})()
+    mission = build(320, 240)
+    mission.pipeline.proposer = stub
+    mission.pipeline.verifier.threshold = 0.0  # untrained net, accept everything
+
+    report = run(path, out_path=str(tmp / "out.json"), mission=mission)
+    assert report["frames"] == T_STEPS + 4, report["frames"]
+    assert report["events"], "a fully tracked box should yield events"
+    assert len(report["survivors"]) == 1, report["survivors"]
+    assert report["survivors"][0]["cell"] is not None
+    # nothing may be reported before the verifier has a full window
+    assert min(e["t"] for e in report["events"]) >= (T_STEPS - 1) / 30.0
+    saved = json.loads((tmp / "out.json").read_text())
+    assert saved["survivors"] == report["survivors"]
+    print(f"ok: {report['frames']} frames, {len(report['events'])} events, "
+          f"cell {report['survivors'][0]['cell']}")
+
+
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

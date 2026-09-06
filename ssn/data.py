@@ -1,163 +1,248 @@
-"""Training data: harvest crop sequences from flight video, auto-labelled.
+"""Training data: harvest candidate sequences from video, label them with a
+teacher, and augment them without destroying the signal the network reads.
 
-There is no public dataset of survivors lying in a 1 m indoor corridor filmed
-from a drone at 1.3 m altitude, so the training set is your own footage. Manual
-labelling of sequences is the bottleneck, so it is skipped: a large offline
-teacher detector (YOLOv8l/x, running on a laptop with no latency budget) labels
-what the small onboard proposer found.
+The labelling is teacher-student. The student proposer (YOLOv8n at low
+confidence) decides *what gets looked at*, exactly as it will in flight, and a
+heavier teacher (YOLOv8l at high confidence) decides *what was really there*.
+Training on the student's own candidate distribution is the point: a set of
+tidy person crops would teach the network nothing about the blurred debris and
+mannequin limbs it actually has to reject.
 
-That gives exactly the supervision the verifier needs - the negatives are the
-onboard proposer's own false positives, which is the distribution it will face.
-Its ceiling is that the teacher's own misses become false negatives, so spot
-check a sample of label 0 sequences before training on them.
+Augmentation rule, and the easiest thing in this file to get wrong: a transform
+caused by the camera is coherent across the window, and only sensor noise is
+per-frame. Motion blur, occluding debris and exposure apply identically to every
+frame of a sample. Re-rolling them per frame would inject exactly the kind of
+one-frame flicker the SSN is trained to treat as evidence of an artefact, and it
+would learn that flicker is normal.
 """
 
 from __future__ import annotations
 
 import argparse
-import random
 from pathlib import Path
-from typing import List, Tuple
 
 import cv2
 import numpy as np
-import torch
-from torch.utils.data import Dataset
 
 from .model import CROP, T_STEPS
-from .perception import Proposer, Tracker, iou, seq_to_tensor
+from .perception import Proposer, Tracker, align, crop_pair, iou
+
+TEACHER_WEIGHTS = "yolov8l.pt"
+TEACHER_CONF = 0.5
+MATCH_IOU = 0.5
 
 
-def harvest(
-    video: str,
-    out_dir: str,
-    teacher: str = "yolov8l.pt",
-    proposer: str = "yolov8n.pt",
-    teacher_conf: float = 0.70,
-    every: int = 3,
-    limit: int = 0,
-) -> Tuple[int, int]:
-    """Write one .npz per sampled crop sequence. Returns (positives, negatives)."""
-    from ultralytics import YOLO
+def teacher_boxes(frame, model=None, conf: float = TEACHER_CONF) -> list[tuple]:
+    """High-confidence person boxes from the heavy model - the label source."""
+    if model is None:
+        from ultralytics import YOLO
 
+        model = teacher_boxes.cache = getattr(teacher_boxes, "cache", None) or YOLO(
+            TEACHER_WEIGHTS
+        )
+    result = model.predict(frame, conf=conf, classes=[0], verbose=False)[0]
+    return [tuple(map(float, b)) for b in result.boxes.xyxy.tolist()]
+
+
+def harvest(video: str, out_dir: str, proposer: Proposer | None = None,
+            teacher=None, max_frames: int = 0, stride: int = 1) -> dict:
+    """Write one .npz per completed candidate window. Returns a label tally.
+
+    A window is labelled positive when the student's tracked box still overlaps a
+    teacher box at the moment the window closes. Tracks that the teacher never
+    confirms are the hard negatives, and they are the majority - that imbalance
+    is real and is handled at training time, not by throwing them away here.
+    """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    cap = cv2.VideoCapture(video)
-    if not cap.isOpened():
-        raise SystemExit(f"cannot open {video}")
-
-    prop = Proposer(proposer, conf=0.15)
-    teach = YOLO(teacher)
+    proposer = proposer or Proposer()
     tracker = Tracker()
-    stem = Path(video).stem
-    pos = neg = frame_no = 0
 
+    capture = cv2.VideoCapture(str(video))
+    if not capture.isOpened():
+        raise SystemExit(f"cannot open video: {video}")
+
+    prev_gray, index, saved = None, 0, {"pos": 0, "neg": 0}
+    stem = Path(video).stem
     while True:
-        ok, frame = cap.read()
-        if not ok:
+        ok, frame = capture.read()
+        if not ok or (max_frames and index >= max_frames):
             break
-        frame_no += 1
-        dets = prop(frame)
-        tracks = tracker.update(frame, dets)
-        if frame_no % every:
+        if index % stride:
+            index += 1
             continue
 
-        tboxes = [
-            (tuple(float(v) for v in b.xyxy[0].tolist()), float(b.conf[0]))
-            for b in teach.predict(frame, conf=teacher_conf, classes=[0], verbose=False)[0].boxes
-        ]
-        for track in tracks:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        delta = (align(prev_gray, gray) if prev_gray is not None
+                 else np.zeros_like(gray, dtype=np.float32))
+        prev_gray = gray
+
+        truth = teacher_boxes(frame, teacher)
+        for track in tracker.update(proposer(frame)):
+            track.samples.append(crop_pair(gray, delta, track.box))
             if not track.ready:
                 continue
-            label = int(any(iou(track.box, tb) >= 0.5 for tb, _ in tboxes))
+            label = int(any(iou(track.box, t) >= MATCH_IOU for t in truth))
             np.savez_compressed(
-                out / f"{stem}_f{frame_no:06d}_t{track.id:03d}.npz",
-                seq=np.stack(track.crops).astype(np.uint8),
-                label=np.int64(label),
-                box=np.array(track.box, np.float32),
-                proposer_conf=np.float32(track.conf),
+                out / f"{stem}_{index:06d}_{track.id:04d}.npz",
+                x=np.stack(list(track.samples)).astype(np.float32),
+                y=np.float32(label),
             )
-            pos, neg = pos + label, neg + (1 - label)
-        if limit and pos + neg >= limit:
-            break
+            saved["pos" if label else "neg"] += 1
+            track.samples.clear()  # non-overlapping windows: no leakage
+        index += 1
 
-    cap.release()
-    return pos, neg
-
-
-def augment(seq: np.ndarray, rng: random.Random) -> np.ndarray:
-    """Augment a (T, 64, 64) uint8 sequence. Every op is applied to all frames
-    identically except the frame dropout, which must break time coherence."""
-    seq = seq.copy()
-    if rng.random() < 0.5:
-        seq = seq[:, :, ::-1]
-    if rng.random() < 0.8:  # brightness / contrast - indoor lighting varies hard
-        gain = rng.uniform(0.7, 1.3)
-        bias = rng.uniform(-30, 30)
-        seq = np.clip(seq.astype(np.float32) * gain + bias, 0, 255).astype(np.uint8)
-    if rng.random() < 0.5:  # sensor noise at high ISO in a dark corridor
-        noise = np.random.normal(0, rng.uniform(2, 12), seq.shape)
-        seq = np.clip(seq.astype(np.float32) + noise, 0, 255).astype(np.uint8)
-    if rng.random() < 0.3:  # dropped/duplicated frame: the tracker does miss
-        i = rng.randrange(1, len(seq))
-        seq[i] = seq[i - 1]
-    if rng.random() < 0.5:  # residual alignment error the phase correlation left
-        dx, dy = rng.randint(-3, 3), rng.randint(-3, 3)
-        seq = np.roll(seq, (dy, dx), axis=(1, 2))
-    return np.ascontiguousarray(seq)
+    capture.release()
+    return saved
 
 
-class SeqDataset(Dataset):
-    """Crop sequences on disk -> (T, 2, 64, 64) tensors."""
+def _directional_blur(image: np.ndarray, length: int, angle: float) -> np.ndarray:
+    kernel = np.zeros((length, length), dtype=np.float32)
+    kernel[length // 2, :] = 1.0
+    matrix = cv2.getRotationMatrix2D((length / 2 - 0.5, length / 2 - 0.5),
+                                     np.degrees(angle), 1.0)
+    kernel = cv2.warpAffine(kernel, matrix, (length, length))
+    total = kernel.sum()
+    return cv2.filter2D(image, -1, kernel / total if total > 0 else kernel)
+
+
+def augment(sample: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    """Physics-based augmentation of one (T, 2, CROP, CROP) window.
+
+    Every transform below is drawn once and applied to the whole window, because
+    every one of them has a cause that persists for longer than a frame - except
+    sensor noise, which is genuinely independent per frame.
+    """
+    out = sample.copy()
+
+    if rng.random() < 0.5:  # airframe roll / heading: whole window flips together
+        out = out[:, :, :, ::-1].copy()
+
+    if rng.random() < 0.4:  # ego-motion smear, one direction for the whole pass
+        length = int(rng.integers(3, 8))
+        angle = rng.uniform(0.0, np.pi)
+        for t in range(out.shape[0]):
+            out[t, 0] = _directional_blur(out[t, 0], length, angle)
+
+    if rng.random() < 0.5:  # rubble interior: dim, low contrast, fixed exposure
+        gain = rng.uniform(0.45, 1.15)
+        bias = rng.uniform(-0.25, 0.1)
+        out[:, 0] = np.clip(out[:, 0] * gain + bias, -1.0, 1.0)
+
+    if rng.random() < 0.35:  # debris occludes the same place across the window
+        h = int(rng.integers(CROP // 6, CROP // 2))
+        w = int(rng.integers(CROP // 6, CROP // 2))
+        y = int(rng.integers(0, CROP - h))
+        x = int(rng.integers(0, CROP - w))
+        drift = rng.integers(-1, 2, size=2)
+        for t in range(out.shape[0]):
+            dy, dx = int(drift[0] * t), int(drift[1] * t)
+            y0, x0 = np.clip(y + dy, 0, CROP - h), np.clip(x + dx, 0, CROP - w)
+            out[t, :, y0:y0 + h, x0:x0 + w] = rng.uniform(-1.0, -0.4)
+
+    # sensor noise is the one genuinely per-frame effect
+    out += rng.normal(0.0, rng.uniform(0.0, 0.06), size=out.shape).astype(np.float32)
+    return np.clip(out, -1.0, 1.0).astype(np.float32)
+
+
+class SequenceDataset:
+    """Loads harvested .npz windows. Indexable, so torch's DataLoader accepts it."""
 
     def __init__(self, root: str, train: bool = True, seed: int = 0):
-        self.files: List[Path] = sorted(Path(root).glob("*.npz"))
-        if not self.files:
-            raise SystemExit(f"no .npz sequences in {root} - run `python -m ssn.data harvest` first")
+        self.paths = sorted(Path(root).glob("*.npz"))
+        if not self.paths:
+            raise SystemExit(f"no .npz windows in {root} - run harvest first")
         self.train = train
-        self.rng = random.Random(seed)
+        self.rng = np.random.default_rng(seed)
 
     def __len__(self) -> int:
-        return len(self.files)
+        return len(self.paths)
+
+    def __getitem__(self, index: int):
+        record = np.load(self.paths[index])
+        x, y = record["x"].astype(np.float32), float(record["y"])
+        if self.train:
+            x = augment(x, self.rng)
+        return x, np.float32(y)
 
     def labels(self) -> np.ndarray:
-        return np.array([int(np.load(f)["label"]) for f in self.files])
-
-    def __getitem__(self, i: int):
-        rec = np.load(self.files[i])
-        seq = rec["seq"]
-        if len(seq) < T_STEPS:  # pad short windows by repeating the first frame
-            seq = np.concatenate([np.repeat(seq[:1], T_STEPS - len(seq), 0), seq])
-        seq = seq[-T_STEPS:]
-        if self.train:
-            seq = augment(seq, self.rng)
-        return seq_to_tensor(seq), torch.tensor(float(rec["label"]))
+        return np.array([float(np.load(p)["y"]) for p in self.paths])
 
 
-def split(root: str, val_frac: float = 0.2, seed: int = 0):
-    """Deterministic train/val split over the same directory."""
-    train, val = SeqDataset(root, True, seed), SeqDataset(root, False, seed)
-    idx = list(range(len(train)))
-    random.Random(seed).shuffle(idx)
-    cut = int(len(idx) * (1 - val_frac))
-    return torch.utils.data.Subset(train, idx[:cut]), torch.utils.data.Subset(val, idx[cut:])
+def synthetic(count: int, rng: np.random.Generator | None = None):
+    """Stand-in windows for exercising the training loop with no footage.
+
+    Positives hold a persistent bright blob; negatives flash one for a single
+    frame at the same total energy. That is a caricature of the real task, and it
+    proves the loop learns *something*, never that the network is mission-ready.
+    """
+    rng = rng or np.random.default_rng(0)
+    x = rng.normal(0.0, 0.25, (count, T_STEPS, 2, CROP, CROP)).astype(np.float32)
+    y = (rng.random(count) < 0.5).astype(np.float32)
+    for i in range(count):
+        cy, cx = rng.integers(16, 48, size=2)
+        if y[i]:
+            x[i, :, 0, cy - 8:cy + 8, cx - 6:cx + 6] += 0.9
+        else:
+            x[i, rng.integers(0, T_STEPS), 0, cy - 8:cy + 8, cx - 6:cx + 6] += 0.9 * T_STEPS
+    return np.clip(x, -1.0, 1.0), y
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(description="harvest SSN training sequences from flight video")
-    ap.add_argument("cmd", choices=["harvest"])
-    ap.add_argument("video")
-    ap.add_argument("--out", default="data/seqs")
-    ap.add_argument("--teacher", default="yolov8l.pt")
-    ap.add_argument("--proposer", default="yolov8n.pt")
-    ap.add_argument("--every", type=int, default=3, help="save every Nth frame per track")
-    ap.add_argument("--limit", type=int, default=0)
-    args = ap.parse_args()
-    pos, neg = harvest(
-        args.video, args.out, args.teacher, args.proposer, every=args.every, limit=args.limit
-    )
-    print(f"{pos} positive, {neg} negative sequences -> {args.out}")
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description="harvest SSN training windows")
+    parser.add_argument("video")
+    parser.add_argument("--out", default="dataset")
+    parser.add_argument("--max-frames", type=int, default=0)
+    parser.add_argument("--stride", type=int, default=1)
+    args = parser.parse_args(argv)
+    tally = harvest(args.video, args.out, max_frames=args.max_frames,
+                    stride=args.stride)
+    total = tally["pos"] + tally["neg"]
+    print(f"{total} windows -> {args.out} "
+          f"({tally['pos']} positive, {tally['neg']} negative)")
+    return 0 if total else 1
+
+
+def _demo():
+    rng = np.random.default_rng(0)
+    # real windows are temporally smooth: one scene, small per-frame sensor
+    # noise. Building the base from independent noise per frame would saturate
+    # the flicker measure below and make the check unable to fail.
+    scene = rng.normal(0, 0.2, (2, CROP, CROP)).astype(np.float32)
+    scene[0, 20:40, 20:40] += 0.8
+    sample = np.stack([scene] * T_STEPS)
+    sample += rng.normal(0, 0.01, sample.shape).astype(np.float32)
+    sample = np.clip(sample, -1.0, 1.0).astype(np.float32)
+
+    out = augment(sample, np.random.default_rng(1))
+    assert out.shape == sample.shape and out.dtype == np.float32
+    assert -1.0 <= out.min() and out.max() <= 1.0
+
+    # the load-bearing property: augmentation must not add per-frame flicker.
+    # Frame-to-frame variation may grow a little from noise, but nothing like
+    # the jump a per-frame re-rolled transform would produce.
+    def flicker(seq):
+        return float(np.abs(np.diff(seq[:, 0], axis=0)).mean())
+
+    # Compared against the same transforms re-rolled per frame - the mistake this
+    # design exists to avoid. Both paths carry identical per-frame sensor noise,
+    # so the gap between them is purely the coherence of the structural
+    # transforms. Absolute flicker would just measure the noise term.
+    coherent = np.median([flicker(augment(sample, np.random.default_rng(s)))
+                          for s in range(12)])
+    per_frame = np.median([
+        flicker(np.stack([augment(sample, np.random.default_rng(s * T_STEPS + t))[t]
+                          for t in range(T_STEPS)]))
+        for s in range(12)
+    ])
+    assert per_frame > 3.0 * coherent, (per_frame, coherent)
+
+    x, y = synthetic(8, rng)
+    assert x.shape == (8, T_STEPS, 2, CROP, CROP)
+    assert set(np.unique(y)) <= {0.0, 1.0}
+    print(f"ok: flicker {coherent:.4f} coherent vs {per_frame:.4f} per-frame "
+          f"({per_frame / coherent:.1f}x)")
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
