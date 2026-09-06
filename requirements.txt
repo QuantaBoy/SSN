@@ -1,0 +1,6 @@
+# Onboard: install opencv-python-headless instead of opencv-python, and export the
+# proposer to NCNN (yolo export model=yolov8n.pt format=ncnn) before flying.
+torch>=2.2
+ultralytics>=8.3
+opencv-python>=4.8
+numpy>=1.26
