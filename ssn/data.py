@@ -25,7 +25,7 @@ import cv2
 import numpy as np
 
 from .model import CROP, T_STEPS
-from .perception import Proposer, Tracker, align, crop_pair, iou
+from .perception import Proposer, Tracker, align, crop_pair, iou, to_gray
 
 TEACHER_WEIGHTS = "yolov8l.pt"
 TEACHER_CONF = 0.5
@@ -45,7 +45,8 @@ def teacher_boxes(frame, model=None, conf: float = TEACHER_CONF) -> list[tuple]:
 
 
 def harvest(video: str, out_dir: str, proposer: Proposer | None = None,
-            teacher=None, max_frames: int = 0, stride: int = 1) -> dict:
+            teacher=None, max_frames: int = 0, stride: int = 1,
+            modality: str = "rgb") -> dict:
     """Write one .npz per completed candidate window. Returns a label tally.
 
     A window is labelled positive when the student's tracked box still overlaps a
@@ -62,7 +63,7 @@ def harvest(video: str, out_dir: str, proposer: Proposer | None = None,
     if not capture.isOpened():
         raise SystemExit(f"cannot open video: {video}")
 
-    prev_gray, index, saved = None, 0, {"pos": 0, "neg": 0}
+    prev_gray, bounds, index, saved = None, None, 0, {"pos": 0, "neg": 0}
     stem = Path(video).stem
     while True:
         ok, frame = capture.read()
@@ -72,7 +73,9 @@ def harvest(video: str, out_dir: str, proposer: Proposer | None = None,
             index += 1
             continue
 
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        # same conversion the runtime uses - a mismatch here trains the network
+        # on an input distribution it will never see in flight
+        gray, bounds = to_gray(frame, modality, bounds)
         delta = (align(prev_gray, gray) if prev_gray is not None
                  else np.zeros_like(gray, dtype=np.float32))
         prev_gray = gray
@@ -194,9 +197,10 @@ def main(argv=None) -> int:
     parser.add_argument("--out", default="dataset")
     parser.add_argument("--max-frames", type=int, default=0)
     parser.add_argument("--stride", type=int, default=1)
+    parser.add_argument("--modality", choices=("rgb", "thermal"), default="rgb")
     args = parser.parse_args(argv)
     tally = harvest(args.video, args.out, max_frames=args.max_frames,
-                    stride=args.stride)
+                    stride=args.stride, modality=args.modality)
     total = tally["pos"] + tally["neg"]
     print(f"{total} windows -> {args.out} "
           f"({tally['pos']} positive, {tally['neg']} negative)")

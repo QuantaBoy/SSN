@@ -26,6 +26,32 @@ from .model import CROP, T_STEPS, SSN
 
 Box = tuple[float, float, float, float]  # x1, y1, x2, y2 in pixels
 
+THERMAL_PCT = (1.0, 99.0)  # robust stretch bounds, ignores dead pixels and sun glint
+THERMAL_ALPHA = 0.1  # how fast those bounds may move per frame
+
+
+def to_gray(frame: np.ndarray, modality: str = "rgb", bounds=None):
+    """Single-channel uint8 from an RGB or a thermal frame, plus carried state.
+
+    Thermal cores return radiometric counts on an arbitrary scale, so they need a
+    stretch that RGB does not. The bounds are carried across frames and allowed to
+    move only slowly: a per-frame stretch would make the normalisation itself
+    flicker, and `align` would read that flicker as scene motion - the same
+    coherence trap the augmentation avoids, arriving through the sensor instead.
+    """
+    if modality == "rgb":
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
+        return gray.astype(np.uint8), bounds
+
+    if frame.ndim == 3:
+        frame = frame[..., 0]
+    lo, hi = np.percentile(frame, THERMAL_PCT)
+    if bounds is not None:
+        lo = bounds[0] + THERMAL_ALPHA * (lo - bounds[0])
+        hi = bounds[1] + THERMAL_ALPHA * (hi - bounds[1])
+    stretched = (frame.astype(np.float32) - lo) / max(float(hi - lo), 1e-6)
+    return (np.clip(stretched, 0.0, 1.0) * 255.0).astype(np.uint8), (lo, hi)
+
 
 def iou(a: Box, b: Box) -> float:
     ix1, iy1 = max(a[0], b[0]), max(a[1], b[1])
@@ -176,14 +202,17 @@ class Pipeline:
 
     def __init__(self, proposer: Proposer | None = None,
                  tracker: Tracker | None = None,
-                 verifier: Verifier | None = None):
+                 verifier: Verifier | None = None,
+                 modality: str = "rgb"):
         self.proposer = proposer or Proposer()
         self.tracker = tracker or Tracker()
         self.verifier = verifier or Verifier()
+        self.modality = modality
         self._prev_gray: np.ndarray | None = None
+        self._bounds = None
 
     def step(self, frame: np.ndarray) -> list[Track]:
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
+        gray, self._bounds = to_gray(frame, self.modality, self._bounds)
         delta = (align(self._prev_gray, gray) if self._prev_gray is not None
                  else np.zeros_like(gray, dtype=np.float32))
         self._prev_gray = gray

@@ -24,14 +24,25 @@ Full function-level architecture, call graph and design rationale:
 ## Pipeline
 
 ```
-frame ──► ego-motion warp ──► YOLOv8n proposer ──► IoU tracker
-                                                      │
-                              6-frame window per track ▼
-                                              SSN spiking verifier
-                                                      │
-                                       floor projection + dedup ▼
-                                              survivor @ grid cell
+ONBOARD (this package)
+  frame ──► ego-motion warp ──► YOLOv8n proposer ──► IoU tracker
+  RGB or thermal                                        │
+                                6-frame window per track ▼
+                                                SSN spiking verifier
+                                                        │
+                        pose from FC telemetry / VIO ──► geotag
+                                                        │
+                                   geotagged detections ▼
+─────────────────────────────────────────────────────────────────
+DOWNSTREAM
+                                          SLAM mapping layer
+                                   (merges sightings into survivors)
 ```
+
+This package ends at geotagged detections. It deliberately does **not** merge
+sightings of the same person into a survivor list — the mapping layer owns that,
+because it has the full trajectory and a better pose. `SurvivorRegistry` in
+`ssn.localize` implements the merge for whoever runs it downstream.
 
 | stage | module | cost (this machine, p95) |
 |---|---|---|
@@ -56,7 +67,7 @@ On the aircraft use `opencv-python-headless`, and export the proposer to NCNN
 
 ```bash
 # 1. harvest labelled windows from footage (YOLOv8l teacher labels the student's candidates)
-python -m ssn.data flight.mp4 --out dataset
+python -m ssn.data flight.mp4 --out dataset --modality rgb
 
 # 2. train, scored on false positives removed at matched recall
 python -m ssn.train --data dataset --epochs 40 --out ssn.pt
@@ -64,9 +75,16 @@ python -m ssn.train --data dataset --epochs 40 --out ssn.pt
 # 3. measure latency on the hardware you will actually fly
 python -m ssn.bench --proposer
 
-# 4. run the mission
-python -m ssn.run flight.mp4 --weights ssn.pt --out survivors.json
+# 4. run the onboard stage
+python -m ssn.run flight.mp4 --weights ssn.pt --modality rgb --out detections.json
 ```
+
+`--modality thermal` switches the input path: thermal cores return radiometric
+counts on an arbitrary scale, so they get a percentile stretch whose bounds move
+only slowly between frames. A per-frame stretch would make the normalisation
+itself flicker and the ego-motion channel would read that as scene movement.
+Harvest and run must use the same modality or the network trains on an input
+distribution it never meets in flight.
 
 Without `--weights` the verifier has random weights and its output is noise.
 `run.py` says so on stderr rather than quietly emitting confident nonsense.
@@ -99,9 +117,14 @@ building is not a metric.
   signal it classifies on.
 - **Floor contact is the bottom edge of the box, not its centre.** Projecting the
   centre puts a standing person half a body too far away.
-- **Pose is injected, not solved.** There is no SLAM here. The default is a fixed
-  hover pose, honest only for footage from a stationary camera. Real flight video
-  through the default pose yields confident, wrong grid cells.
+- **Pose is injected, not solved.** There is no SLAM here — `build(pose_at=…)`
+  takes the live pose stream from FC telemetry or VIO. The default fixed hover
+  pose is a stand-in for bench footage; real flight video through it yields
+  confident, wrong geotags.
+- **Mapping is downstream.** The onboard stage emits one record per verified
+  detection with its own position and pose, and stops. Merging those into
+  survivor positions belongs to the SLAM mapping layer; doing it here as well
+  would give two components a claim on the same map.
 
 ## Tests
 

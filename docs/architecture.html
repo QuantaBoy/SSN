@@ -561,9 +561,9 @@
             <text class="svg-t" x="830" y="62" text-anchor="middle">locate</text>
             <text class="svg-t-sm" x="830" y="78" text-anchor="middle">ray → floor</text>
 
-            <rect class="svg-box" x="916" y="40" width="128" height="52" rx="2"/>
-            <text class="svg-t" x="980" y="62" text-anchor="middle">Registry</text>
-            <text class="svg-t-sm" x="980" y="78" text-anchor="middle">merge + cap 6</text>
+            <rect class="svg-box-signal" x="916" y="40" width="128" height="52" rx="2"/>
+            <text class="svg-t" x="980" y="62" text-anchor="middle">geotag</text>
+            <text class="svg-t-sm" x="980" y="78" text-anchor="middle">record out</text>
           </g>
 
           <!-- main row arrows -->
@@ -602,15 +602,25 @@
           <path class="svg-line" d="M 680 98 L 680 128 L 600 128" stroke-dasharray="3 3" marker-end="url(#ar)" color="var(--ink-3)"/>
           <text class="svg-t-edge" x="592" y="132" text-anchor="end">not ready → hold</text>
 
-          <!-- output -->
-          <text class="svg-t-edge" x="980" y="120" text-anchor="middle">JSON event</text>
-          <line class="svg-line" x1="980" y1="98" x2="980" y2="108" marker-end="url(#ar)" color="var(--ink-3)"/>
+          <!-- pose injection -->
+          <line class="svg-line" x1="830" y1="140" x2="830" y2="98" marker-end="url(#ar)" color="var(--ink-3)"/>
+          <text class="svg-t-edge" x="838" y="136">pose from FC telemetry / VIO</text>
+
+          <!-- handoff boundary -->
+          <line x1="874" y1="118" x2="1052" y2="118" stroke="var(--accent)" stroke-width="1" stroke-dasharray="4 3"/>
+          <text class="svg-t-edge" x="1044" y="112" text-anchor="end" fill="var(--accent)">onboard ends here</text>
+          <line class="svg-line" x1="980" y1="98" x2="980" y2="136" marker-end="url(#ar)" color="var(--ink-3)"/>
+          <rect class="svg-box" x="908" y="142" width="144" height="46" rx="2" stroke-dasharray="4 3"/>
+          <text class="svg-t" x="980" y="162" text-anchor="middle">SLAM mapping</text>
+          <text class="svg-t-sm" x="980" y="177" text-anchor="middle">merges into survivors</text>
         </svg>
         <figcaption>
           <b>One warp per frame, not one per candidate.</b> <code>align</code> runs once on the whole
           image and every crop reads from the same delta — the difference between affordable and not
-          on a Pi 5. A track that has fewer than six frames is held, not guessed at, so the first
-          possible report is on frame six.
+          on a Pi 5. A track with fewer than six frames is held, not guessed at, so the first possible
+          report is on frame six. <b>The onboard stage stops at geotagged detections</b>; merging
+          repeat sightings of one person into a survivor list is the mapping layer's job, and doing it
+          here too would give two components a claim on the same map.
         </figcaption>
       </figure>
 
@@ -927,14 +937,15 @@
             <table>
               <thead><tr><th>Symbol</th><th>Role</th><th>Line</th></tr></thead>
               <tbody>
-                <tr><td class="sym">iou<span class="args">(a, b)</span></td><td>Box overlap. Used by the tracker and by label matching in <code>data.harvest</code>.</td><td class="ln">30</td></tr>
-                <tr><td class="sym">align<span class="args">(prev_gray, cur_gray)</span></td><td>Sparse LK flow → partial affine → warp → signed difference. Cancels camera motion so a still survivor survives the subtraction.</td><td class="ln">41</td></tr>
-                <tr><td class="sym">crop_pair<span class="args">(gray, delta, box)</span></td><td>Builds the 2-channel 64×64 sample in [−1, 1]: luma and ego-compensated delta.</td><td class="ln">64</td></tr>
-                <tr><td class="sym">Track</td><td>One candidate identity: box, hits, misses, and a <code>deque(maxlen=6)</code> of samples. <code>ready</code> is true only at a full window.</td><td class="ln">78</td></tr>
-                <tr><td class="sym">Tracker.update<span class="args">(boxes)</span></td><td>Greedy IoU association, ages out after <code>max_misses</code>, spawns new ids for unmatched boxes. No motion model by choice.</td><td class="ln">105</td></tr>
-                <tr><td class="sym">Proposer.__call__<span class="args">(frame)</span></td><td>YOLOv8n person boxes at confidence 0.15. Weights load lazily on first call.</td><td class="ln">142</td></tr>
-                <tr><td class="sym">Verifier.__call__<span class="args">(tracks)</span></td><td>Batches every ready track into one SSN call, writes back confidences, returns those over threshold.</td><td class="ln">162</td></tr>
-                <tr><td class="sym">Pipeline.step<span class="args">(frame)</span></td><td>Per-frame glue tying the five above together and holding <code>prev_gray</code>.</td><td class="ln">185</td></tr>
+                <tr><td class="sym">iou<span class="args">(a, b)</span></td><td>Box overlap. Used by the tracker and by label matching in <code>data.harvest</code>.</td><td class="ln">56</td></tr>
+                <tr><td class="sym">to_gray<span class="args">(frame, modality, bounds)</span></td><td>RGB or thermal in, one grey plane out. Thermal gets a percentile stretch whose bounds move only slowly — a per-frame stretch would flicker and <code>align</code> would read it as motion.</td><td class="ln">33</td></tr>
+                <tr><td class="sym">align<span class="args">(prev_gray, cur_gray)</span></td><td>Sparse LK flow → partial affine → warp → signed difference. Cancels camera motion so a still survivor survives the subtraction.</td><td class="ln">67</td></tr>
+                <tr><td class="sym">crop_pair<span class="args">(gray, delta, box)</span></td><td>Builds the 2-channel 64×64 sample in [−1, 1]: luma and ego-compensated delta.</td><td class="ln">90</td></tr>
+                <tr><td class="sym">Track</td><td>One candidate identity: box, hits, misses, and a <code>deque(maxlen=6)</code> of samples. <code>ready</code> is true only at a full window.</td><td class="ln">104</td></tr>
+                <tr><td class="sym">Tracker.update<span class="args">(boxes)</span></td><td>Greedy IoU association, ages out after <code>max_misses</code>, spawns new ids for unmatched boxes. No motion model by choice.</td><td class="ln">131</td></tr>
+                <tr><td class="sym">Proposer.__call__<span class="args">(frame)</span></td><td>YOLOv8n person boxes at confidence 0.15. Weights load lazily on first call.</td><td class="ln">168</td></tr>
+                <tr><td class="sym">Verifier.__call__<span class="args">(tracks)</span></td><td>Batches every ready track into one SSN call, writes back confidences, returns those over threshold.</td><td class="ln">188</td></tr>
+                <tr><td class="sym">Pipeline.step<span class="args">(frame)</span></td><td>Per-frame glue tying the five above together and holding <code>prev_gray</code>.</td><td class="ln">214</td></tr>
               </tbody>
             </table>
           </div>
@@ -967,8 +978,8 @@
                 <tr><td class="sym">locate<span class="args">(camera, pose, u, v)</span></td><td>Ray–plane intersection with the floor. Returns <code>None</code> for level or upward rays rather than extrapolating a meaningless grazing hit.</td><td class="ln">65</td></tr>
                 <tr><td class="sym">Arena<span class="args">(size, divisions)</span></td><td>15 m square split into a 5×5 letter/number grid; A1 is the origin corner.</td><td class="ln">80</td></tr>
                 <tr><td class="sym">grid_cell<span class="args">(arena, point)</span></td><td>Floor point → <code>"B3"</code>, or <code>None</code> outside the arena.</td><td class="ln">94</td></tr>
-                <tr><td class="sym">SurvivorRegistry.add</td><td>Merges a sighting within <code>radius</code> into a running mean, else creates one; enforces the capacity of 6, and only a stronger sighting may displace a weaker one.</td><td class="ln">119</td></tr>
-                <tr><td class="sym">SurvivorRegistry.report</td><td>Serialisable summary sorted by confidence — what lands in the JSON.</td><td class="ln">143</td></tr>
+                <tr><td class="sym">SurvivorRegistry.add</td><td>Merges a sighting within <code>radius</code> into a running mean, else creates one; enforces the capacity of 6, and only a stronger sighting may displace a weaker one. <em>Not called onboard</em> — provided for the SLAM mapping layer.</td><td class="ln">119</td></tr>
+                <tr><td class="sym">SurvivorRegistry.report</td><td>Serialisable summary sorted by confidence, for whoever runs the merge downstream.</td><td class="ln">143</td></tr>
               </tbody>
             </table>
           </div>
@@ -999,9 +1010,9 @@
                 <tr><td class="sym">teacher_boxes<span class="args">(frame, model, conf)</span></td><td>YOLOv8l at 0.5 — the label source. Caches the loaded teacher on the function.</td><td class="ln">35</td></tr>
                 <tr><td class="sym">harvest<span class="args">(video, out_dir, …)</span></td><td>Runs the student front-end over footage, labels each completed window by IoU ≥ 0.5 against the teacher, writes one <code>.npz</code> each, clears the buffer so windows never overlap.</td><td class="ln">47</td></tr>
                 <tr><td class="sym">_directional_blur</td><td>Rotated line kernel — the motion-blur primitive.</td><td class="ln">99</td></tr>
-                <tr><td class="sym">augment<span class="args">(sample, rng)</span></td><td>Flip, motion blur, exposure and debris occlusion drawn <em>once per window</em>; only sensor noise is per-frame.</td><td class="ln">109</td></tr>
-                <tr><td class="sym">SequenceDataset</td><td>Indexable view over harvested <code>.npz</code> files; augments only when <code>train=True</code>. <code>labels()</code> exposes the class balance for <code>pos_weight</code>.</td><td class="ln">148</td></tr>
-                <tr><td class="sym">synthetic<span class="args">(count, rng)</span></td><td>Persistent blob vs single-frame flash. Exercises the training loop with no footage; proves the loop runs, never that the model is mission-ready.</td><td class="ln">172</td></tr>
+                <tr><td class="sym">augment<span class="args">(sample, rng)</span></td><td>Flip, motion blur, exposure and debris occlusion drawn <em>once per window</em>; only sensor noise is per-frame.</td><td class="ln">112</td></tr>
+                <tr><td class="sym">SequenceDataset</td><td>Indexable view over harvested <code>.npz</code> files; augments only when <code>train=True</code>. <code>labels()</code> exposes the class balance for <code>pos_weight</code>.</td><td class="ln">151</td></tr>
+                <tr><td class="sym">synthetic<span class="args">(count, rng)</span></td><td>Persistent blob vs single-frame flash. Exercises the training loop with no footage; proves the loop runs, never that the model is mission-ready.</td><td class="ln">175</td></tr>
               </tbody>
             </table>
           </div>
@@ -1094,10 +1105,10 @@
             <table>
               <thead><tr><th>Symbol</th><th>Role</th><th>Line</th></tr></thead>
               <tbody>
-                <tr><td class="sym">Mission.step<span class="args">(frame, timestamp)</span></td><td>Pipeline step → <code>locate</code> on each verified box → <code>registry.add</code> → event dicts.</td><td class="ln">36</td></tr>
-                <tr><td class="sym">build<span class="args">(width, height, hfov, altitude, weights, threshold)</span></td><td>Assembles camera, arena, pipeline, registry and the pose callable into a <code>Mission</code>.</td><td class="ln">55</td></tr>
-                <tr><td class="sym">run<span class="args">(source, out_path, max_frames, mission, show)</span></td><td>Capture loop over a file or webcam index; releases the capture and swallows the headless <code>destroyAllWindows</code> failure in <code>finally</code>.</td><td class="ln">69</td></tr>
-                <tr><td class="sym">main</td><td>CLI. Warns on stderr when no <code>--weights</code> is given rather than quietly emitting confident nonsense.</td><td class="ln">108</td></tr>
+                <tr><td class="sym">Mission.step<span class="args">(frame, timestamp)</span></td><td>Pipeline step → <code>locate</code> on each verified box → <code>registry.add</code> → event dicts.</td><td class="ln">35</td></tr>
+                <tr><td class="sym">build<span class="args">(width, height, hfov, altitude, weights, threshold)</span></td><td>Assembles camera, arena, pipeline, registry and the pose callable into a <code>Mission</code>.</td><td class="ln">65</td></tr>
+                <tr><td class="sym">run<span class="args">(source, out_path, max_frames, mission, show)</span></td><td>Capture loop over a file or webcam index; releases the capture and swallows the headless <code>destroyAllWindows</code> failure in <code>finally</code>.</td><td class="ln">86</td></tr>
+                <tr><td class="sym">main</td><td>CLI. Warns on stderr when no <code>--weights</code> is given rather than quietly emitting confident nonsense.</td><td class="ln">126</td></tr>
               </tbody>
             </table>
           </div>
@@ -1111,9 +1122,16 @@
       <div class="note">
         <p>
           <strong>Pose is injected, not solved.</strong> There is no SLAM in this package.
-          <code>build</code> installs a fixed hover pose, which is honest only for footage from a
-          stationary camera. Real flight video through the default pose produces confident, wrong grid
-          cells — the flight build must supply a real <code>pose_at(t)</code>.
+          <code>build(pose_at=…)</code> takes the live pose stream from FC telemetry or VIO; the
+          default fixed hover pose is a stand-in for bench footage only. Real flight video through the
+          default produces confident, wrong geotags.
+        </p>
+        <p>
+          <strong>The layer boundary is here.</strong> <code>Mission.step</code> emits one record per
+          verified detection — time, track, box, confidence, floor position, grid cell, and the pose it
+          was tagged with — and stops. Each record stands alone, so the mapping layer can associate
+          them against its own trajectory without inheriting a decision this layer had no business
+          making.
         </p>
       </div>
     </section>
