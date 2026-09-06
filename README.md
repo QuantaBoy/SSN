@@ -18,8 +18,10 @@ artefact is not.** A spiking network integrates evidence across a short window i
 its membrane potentials, so weak-but-persistent evidence accumulates past
 threshold while a one-frame artefact leaks away before it can fire.
 
-Full function-level architecture, call graph and design rationale:
-[`docs/architecture.html`](docs/architecture.html) — open it in a browser.
+- [`docs/GUIDELINES.md`](docs/GUIDELINES.md) — how to capture footage, train, validate
+  and deploy, and the invariants that must not be broken. **Read this before capturing data.**
+- [`docs/architecture.html`](docs/architecture.html) — function-level architecture, call
+  graph and design rationale. Open in a browser.
 
 ## Pipeline
 
