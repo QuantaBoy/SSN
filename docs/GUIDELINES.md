@@ -14,8 +14,7 @@ This package is the **onboard stage**: video in, geotagged detections out.
 
 ```
 camera ──► SSN onboard stage ──► geotagged detections ──► SLAM mapping layer
- RGB or                          (this package ends here)   (merges into survivors)
- thermal
+ RGB                             (this package ends here)   (merges into survivors)
 ```
 
 It does **not** decide how many survivors there are. Merging repeat sightings of the
@@ -50,8 +49,10 @@ capture beats a month of model work.
   training but not at runtime, so the network learns an inter-frame motion magnitude the
   mission never produces. If harvest is too slow, shoot shorter clips or drop the capture
   frame rate — do not skip frames.
-- **One modality per dataset.** Do not mix RGB and thermal clips in the same `--out`
-  directory.
+- **Shoot the lighting you will fly in, not better lighting.** `crop_pair` standardises
+  each luma crop, so a uniform exposure offset costs nothing — but a blown-out doorway or
+  a crushed-black corner is not an affine change and cannot be undone. Those frames have
+  to be in the dataset, not avoided during capture.
 
 ### Start small
 
@@ -64,7 +65,7 @@ framing actually work — and that is much cheaper to learn now.
 ## 2. Harvesting
 
 ```bash
-python -m ssn.data clip.mp4 --out dataset --modality rgb
+python -m ssn.data clip.mp4 --out dataset
 ```
 
 The first run downloads YOLOv8n and YOLOv8l (~90 MB). YOLOv8l runs on **every frame** and
@@ -134,6 +135,13 @@ Do all four. Skipping any one of them is how a system that passes on a laptop fa
 the aircraft.
 
 1. **Gate B on held-out real data.** Not synthetic. Not the training split.
+   ```bash
+   python -m ssn.evaluate --data dataset --weights ssn.pt
+   ```
+   Reads `output/report.txt` back to the terminal and leaves `metrics.json`,
+   `curves.png` and `scores.npz` beside it. Check the **per-clip table**, not just the
+   total: a clip that holds only one class proves nothing, and a total driven by such a
+   clip is a model that learned which footage a window came from.
 2. **Latency on the actual flight computer.**
    ```bash
    python -m ssn.bench --proposer
@@ -152,13 +160,11 @@ the aircraft.
 ## 5. Deployment
 
 ```bash
-python -m ssn.run flight.mp4 --weights ssn.pt --modality rgb --out detections.json
+python -m ssn.run flight.mp4 --weights ssn.pt --out detections.json
 ```
 
 - Install `opencv-python-headless` on the aircraft, not `opencv-python`.
 - Export the proposer: `yolo export model=yolov8n.pt format=ncnn`.
-- **`--modality` must match what the dataset was harvested with.** A mismatch trains on
-  one input distribution and flies on another, and nothing will warn you.
 - Without `--weights` the model has random weights. It warns on stderr and its output is
   noise — never interpret a run that printed that warning.
 - Checkpoints (`*.pt`), datasets and footage are gitignored on purpose. Share a trained
@@ -170,16 +176,19 @@ python -m ssn.run flight.mp4 --weights ssn.pt --modality rgb --out detections.js
 
 Each of these exists because breaking it produces a model that looks fine and is not.
 
-- **Augmentation is coherent across a window.** Motion blur, exposure and occlusion are
-  drawn once per window because each has a cause that outlasts a frame; only sensor noise
-  is per-frame. Re-rolling the rest per frame teaches the network that one-frame flicker is
+- **Augmentation is coherent across a window.** Motion blur and occlusion are drawn once
+  per window because each has a cause that outlasts a frame; only sensor noise is
+  per-frame. Re-rolling the rest per frame teaches the network that one-frame flicker is
   normal — destroying the exact signal it classifies on. Asserted in `data._demo`.
-- **Thermal normalization bounds move slowly.** A per-frame percentile stretch makes the
-  normalization itself flicker, and `align` reads that as scene motion. Asserted in
-  `run._demo`.
+- **Normalization is per crop, never per frame.** `crop_pair` standardises the luma crop
+  so exposure cancels. Doing it on the whole frame instead would remap between frames and
+  `align` would read that remapping as scene motion. Asserted in `perception._demo`.
+- **The delta channel is never normalized.** It is a difference, so it carries no exposure
+  to remove, and rescaling it destroys the magnitude that separates a moving survivor from
+  noise. Asserted in `perception._demo`.
 - **One ego-motion warp per frame, not per candidate.** Per-candidate warping is the
   difference between fitting the frame budget and not.
-- **Harvest and run use the same modality and frame rate.**
+- **Harvest and run use the same frame rate.**
 - **The onboard stage does not merge detections.** That is the mapping layer's decision.
 - **Never `torch.set_grad_enabled(False)` at module scope.** It leaks out of the function
   and silently breaks training later in the same process. Use a scoped `torch.no_grad()`.
@@ -201,7 +210,7 @@ Honest status, so nobody builds on a false assumption.
 | No SLAM / pose source wired | Geotags wrong in flight | The mapping/VIO layer |
 | Camera intrinsics are a guessed FOV | Position error in every geotag | Calibration session |
 | Never run on Pi 5 / Orin | Latency margin unverified on target | Hardware access |
-| Thermal path untested on a real core | Normalization tuned against synthetic 16-bit frames only | A thermal camera |
+| Non-affine exposure damage unmodelled | Blown highlights / crushed blacks are not cancelled by crop standardisation | Footage shot against bright doorways |
 
 ### The question that gates several of these
 
@@ -214,4 +223,6 @@ mannequins, or unheated dummies. This is not a detail:
 - If **live volunteers**, proxy footage of real people is exactly right and can be shot
   immediately.
 
-Send that email before spending on capture or on a thermal core.
+The sensor half of that question is already settled: the payload is RGB only, so nothing
+in this package waits on a thermal answer. What still gates capture is whether YOLOv8l
+will label the targets at all.

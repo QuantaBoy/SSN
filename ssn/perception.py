@@ -11,6 +11,13 @@ signed difference. On a moving drone an unwarped difference is dominated by
 camera translation, and a lying survivor - who barely moves - vanishes into it.
 One warp per frame rather than one per crop is what keeps this affordable on a
 Pi 5 CPU.
+
+RGB only. A visible-light camera is the whole payload, so everything the
+verifier gets has to be recovered from luma and motion, and the two places that
+costs something are handled here: contrast equalisation per crop, so a candidate
+in an unlit room reads like the same candidate in a lit corridor, and the batch
+priority in `Verifier`, because an RGB proposer in rubble over-proposes harder
+than a thermal one would.
 """
 
 from __future__ import annotations
@@ -26,31 +33,16 @@ from .model import CROP, T_STEPS, SSN
 
 Box = tuple[float, float, float, float]  # x1, y1, x2, y2 in pixels
 
-THERMAL_PCT = (1.0, 99.0)  # robust stretch bounds, ignores dead pixels and sun glint
-THERMAL_ALPHA = 0.1  # how fast those bounds may move per frame
+FLOW_SCALE = 0.5  # ego-motion is measured at this scale and applied at full res
+
+NOISE_FLOOR = 8.0  # grey counts; below this a crop is flat and only holds noise
 
 
-def to_gray(frame: np.ndarray, modality: str = "rgb", bounds=None):
-    """Single-channel uint8 from an RGB or a thermal frame, plus carried state.
-
-    Thermal cores return radiometric counts on an arbitrary scale, so they need a
-    stretch that RGB does not. The bounds are carried across frames and allowed to
-    move only slowly: a per-frame stretch would make the normalisation itself
-    flicker, and `align` would read that flicker as scene motion - the same
-    coherence trap the augmentation avoids, arriving through the sensor instead.
-    """
-    if modality == "rgb":
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
-        return gray.astype(np.uint8), bounds
-
+def to_gray(frame: np.ndarray) -> np.ndarray:
+    """Single-channel uint8 luma from a BGR frame."""
     if frame.ndim == 3:
-        frame = frame[..., 0]
-    lo, hi = np.percentile(frame, THERMAL_PCT)
-    if bounds is not None:
-        lo = bounds[0] + THERMAL_ALPHA * (lo - bounds[0])
-        hi = bounds[1] + THERMAL_ALPHA * (hi - bounds[1])
-    stretched = (frame.astype(np.float32) - lo) / max(float(hi - lo), 1e-6)
-    return (np.clip(stretched, 0.0, 1.0) * 255.0).astype(np.uint8), (lo, hi)
+        return cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    return frame.astype(np.uint8)
 
 
 def iou(a: Box, b: Box) -> float:
@@ -71,16 +63,24 @@ def align(prev_gray: np.ndarray, cur_gray: np.ndarray) -> np.ndarray:
     uniform scale). That model fits drone motion over one frame interval well
     enough; a full homography needs more correspondences than a low-texture
     indoor maze reliably provides, and fails loudly when it does not get them.
+
+    Corners and flow run at FLOW_SCALE, which is where the cost of this function
+    sits: a quarter of the pixels for the same affine, since one frame of drone
+    motion is many pixels wide and does not need full resolution to be measured.
+    Under that rescale only the translation column of a partial affine changes.
     """
-    pts = cv2.goodFeaturesToTrack(prev_gray, maxCorners=200, qualityLevel=0.01,
-                                  minDistance=8)
+    small_prev = cv2.resize(prev_gray, None, fx=FLOW_SCALE, fy=FLOW_SCALE)
+    small_cur = cv2.resize(cur_gray, None, fx=FLOW_SCALE, fy=FLOW_SCALE)
+    pts = cv2.goodFeaturesToTrack(small_prev, maxCorners=200, qualityLevel=0.01,
+                                  minDistance=4)
     warped = prev_gray
     if pts is not None and len(pts) >= 6:
-        nxt, ok, _ = cv2.calcOpticalFlowPyrLK(prev_gray, cur_gray, pts, None)
+        nxt, ok, _ = cv2.calcOpticalFlowPyrLK(small_prev, small_cur, pts, None)
         ok = ok.ravel().astype(bool)
         if ok.sum() >= 6:
             matrix, _ = cv2.estimateAffinePartial2D(pts[ok], nxt[ok])
             if matrix is not None:
+                matrix[:, 2] /= FLOW_SCALE  # measured in half-res pixels
                 h, w = cur_gray.shape[:2]
                 warped = cv2.warpAffine(prev_gray, matrix, (w, h),
                                         borderMode=cv2.BORDER_REPLICATE)
@@ -88,14 +88,29 @@ def align(prev_gray: np.ndarray, cur_gray: np.ndarray) -> np.ndarray:
 
 
 def crop_pair(gray: np.ndarray, delta: np.ndarray, box: Box) -> np.ndarray:
-    """Two-channel CROPxCROP sample in [-1, 1]: luma and ego-compensated delta."""
+    """Two-channel CROPxCROP sample in [-1, 1]: luma and ego-compensated delta.
+
+    The luma crop is standardised per crop. Auto-exposure and auto-gain change
+    the luma by an affine map, and subtracting the crop mean and dividing by its
+    spread cancels exactly that map: the same candidate in an unlit room and in a
+    window-lit corridor arrives at the network as the same tensor. Dividing by
+    twice the spread keeps roughly 95% of the crop inside [-1, 1] instead of
+    clipping most of it flat, and the NOISE_FLOOR stops a featureless crop from
+    being amplified into pure sensor noise.
+
+    The delta crop is deliberately left alone: a difference carries no exposure
+    to remove, and rescaling it would destroy the very magnitude that separates a
+    moving survivor from noise.
+    """
     h, w = gray.shape[:2]
     x1 = int(max(0, min(box[0], w - 1)))
     y1 = int(max(0, min(box[1], h - 1)))
     x2 = int(max(x1 + 1, min(box[2], w)))
     y2 = int(max(y1 + 1, min(box[3], h)))
     size = (CROP, CROP)
-    luma = cv2.resize(gray[y1:y2, x1:x2], size).astype(np.float32) / 127.5 - 1.0
+    luma = cv2.resize(gray[y1:y2, x1:x2], size).astype(np.float32)
+    luma = np.clip((luma - luma.mean()) / (2.0 * max(float(luma.std()),
+                                                     NOISE_FLOOR)), -1.0, 1.0)
     diff = cv2.resize(delta[y1:y2, x1:x2], size) / 127.5
     return np.stack([luma, np.clip(diff, -1.0, 1.0)])
 
@@ -184,9 +199,16 @@ class Verifier:
         self.threshold = threshold
         self.max_batch = max_batch
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def __call__(self, tracks: list[Track]) -> list[Track]:
-        ready = [t for t in tracks if t.ready][: self.max_batch]
+        # Most-established first. Past max_batch the batch has to drop someone,
+        # and dropping by list order drops whichever candidate the proposer
+        # happened to emit last. A track with more hits has survived more frames
+        # of association and is the better use of a fixed budget - which matters
+        # more on RGB, where a low-confidence proposer in rubble routinely
+        # returns more candidates than one batch can hold.
+        ready = sorted((t for t in tracks if t.ready), key=lambda t: -t.hits)
+        ready = ready[: self.max_batch]
         if not ready:
             return []
         batch = torch.from_numpy(
@@ -202,17 +224,14 @@ class Pipeline:
 
     def __init__(self, proposer: Proposer | None = None,
                  tracker: Tracker | None = None,
-                 verifier: Verifier | None = None,
-                 modality: str = "rgb"):
+                 verifier: Verifier | None = None):
         self.proposer = proposer or Proposer()
         self.tracker = tracker or Tracker()
         self.verifier = verifier or Verifier()
-        self.modality = modality
         self._prev_gray: np.ndarray | None = None
-        self._bounds = None
 
     def step(self, frame: np.ndarray) -> list[Track]:
-        gray, self._bounds = to_gray(frame, self.modality, self._bounds)
+        gray = to_gray(frame)
         delta = (align(self._prev_gray, gray) if self._prev_gray is not None
                  else np.zeros_like(gray, dtype=np.float32))
         self._prev_gray = gray
@@ -256,6 +275,27 @@ def _demo():
     assert sample.shape == (2, CROP, CROP)
     assert -1.0 <= sample.min() and sample.max() <= 1.0
 
+    # the same scene under a different exposure must reach the network as the
+    # same luma tensor - that invariance is what standardising the crop buys
+    lit = np.full((90, 40), 200, np.uint8)
+    lit[20:70, 10:30] = 60
+    dim = (lit.astype(np.float32) * 0.5 + 20).astype(np.uint8)
+    flat = np.zeros(lit.shape, dtype=np.float32)
+    box = (0, 0, 40, 90)
+    assert np.abs(crop_pair(lit, flat, box)[0]
+                  - crop_pair(dim, flat, box)[0]).max() < 0.02
+
+    # a featureless crop must stay featureless, not be amplified into noise
+    empty = np.full((90, 40), 40, np.uint8)
+    empty[0, 0] = 41  # one count of dither, still far below NOISE_FLOOR
+    assert np.abs(crop_pair(empty, flat, box)[0]).max() < 0.2
+
+    # and none of that may reach the delta channel: twice the motion signal has
+    # to stay twice as large, not be normalised back to the same crop
+    faint = crop_pair(lit, np.full_like(flat, 20.0), box)
+    strong = crop_pair(lit, np.full_like(flat, 40.0), box)
+    assert abs(strong[1].mean() - 2.0 * faint[1].mean()) < 1e-6
+
     # verifier stays silent until a track holds a full window
     tracker, verifier = Tracker(), Verifier()
     for _ in range(T_STEPS):
@@ -266,6 +306,16 @@ def _demo():
     assert tracker.tracks[0].ready
     verifier.threshold = 0.0
     assert len(verifier(tracker.tracks)) == 1
+
+    # over budget, the batch keeps the established track and drops the fresh one
+    established = Track(0, (10, 10, 50, 90), hits=9)
+    fresh = Track(1, (60, 10, 100, 90), hits=1)
+    for track in (established, fresh):
+        for _ in range(T_STEPS):
+            track.samples.append(sample)
+    small = Verifier(max_batch=1, threshold=0.0)
+    assert [t.id for t in small([fresh, established])] == [0]
+
     print(f"ok: delta {compensated:.1f} vs raw {raw:.1f}, "
           f"conf {tracker.tracks[0].confidence:.3f}")
 

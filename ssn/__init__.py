@@ -6,8 +6,8 @@ from .localize import Arena, Camera, Pose, SurvivorRegistry, grid_cell, locate
 from .model import CROP, LIF, SSN, T_STEPS
 from .perception import Pipeline, Proposer, Track, Tracker, Verifier, to_gray
 from .run import Mission
-# the train *function* is deliberately not re-exported here: it would shadow the
-# ssn.train module for anyone doing `from ssn import train`.
+# the train and evaluate *functions* are deliberately not re-exported here: each
+# would shadow its own module for anyone doing `from ssn import train`.
 from .train import matched_recall
 
 __all__ = [

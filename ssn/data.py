@@ -10,8 +10,8 @@ mannequin limbs it actually has to reject.
 
 Augmentation rule, and the easiest thing in this file to get wrong: a transform
 caused by the camera is coherent across the window, and only sensor noise is
-per-frame. Motion blur, occluding debris and exposure apply identically to every
-frame of a sample. Re-rolling them per frame would inject exactly the kind of
+per-frame. Motion blur and occluding debris apply identically to every frame of a
+sample. Re-rolling them per frame would inject exactly the kind of
 one-frame flicker the SSN is trained to treat as evidence of an artefact, and it
 would learn that flicker is normal.
 """
@@ -45,8 +45,7 @@ def teacher_boxes(frame, model=None, conf: float = TEACHER_CONF) -> list[tuple]:
 
 
 def harvest(video: str, out_dir: str, proposer: Proposer | None = None,
-            teacher=None, max_frames: int = 0, stride: int = 1,
-            modality: str = "rgb") -> dict:
+            teacher=None, max_frames: int = 0, stride: int = 1) -> dict:
     """Write one .npz per completed candidate window. Returns a label tally.
 
     A window is labelled positive when the student's tracked box still overlaps a
@@ -63,7 +62,7 @@ def harvest(video: str, out_dir: str, proposer: Proposer | None = None,
     if not capture.isOpened():
         raise SystemExit(f"cannot open video: {video}")
 
-    prev_gray, bounds, index, saved = None, None, 0, {"pos": 0, "neg": 0}
+    prev_gray, index, saved = None, 0, {"pos": 0, "neg": 0}
     stem = Path(video).stem
     while True:
         ok, frame = capture.read()
@@ -75,7 +74,7 @@ def harvest(video: str, out_dir: str, proposer: Proposer | None = None,
 
         # same conversion the runtime uses - a mismatch here trains the network
         # on an input distribution it will never see in flight
-        gray, bounds = to_gray(frame, modality, bounds)
+        gray = to_gray(frame)
         delta = (align(prev_gray, gray) if prev_gray is not None
                  else np.zeros_like(gray, dtype=np.float32))
         prev_gray = gray
@@ -127,10 +126,11 @@ def augment(sample: np.ndarray, rng: np.random.Generator) -> np.ndarray:
         for t in range(out.shape[0]):
             out[t, 0] = _directional_blur(out[t, 0], length, angle)
 
-    if rng.random() < 0.5:  # rubble interior: dim, low contrast, fixed exposure
-        gain = rng.uniform(0.45, 1.15)
-        bias = rng.uniform(-0.25, 0.1)
-        out[:, 0] = np.clip(out[:, 0] * gain + bias, -1.0, 1.0)
+    # No exposure/gain augmentation: `crop_pair` standardises the luma crop, so
+    # an affine exposure change is already cancelled before the network sees it
+    # and simulating one here would only teach the network to undo it twice.
+    # Blown highlights and crushed blacks are not affine and remain a real gap -
+    # they need footage shot against a bright doorway, not an augmentation.
 
     if rng.random() < 0.35:  # debris occludes the same place across the window
         h = int(rng.integers(CROP // 6, CROP // 2))
@@ -152,6 +152,7 @@ class SequenceDataset:
     """Loads harvested .npz windows. Indexable, so torch's DataLoader accepts it."""
 
     def __init__(self, root: str, train: bool = True, seed: int = 0):
+        self.root = root
         self.paths = sorted(Path(root).glob("*.npz"))
         if not self.paths:
             raise SystemExit(f"no .npz windows in {root} - run harvest first")
@@ -197,10 +198,9 @@ def main(argv=None) -> int:
     parser.add_argument("--out", default="dataset")
     parser.add_argument("--max-frames", type=int, default=0)
     parser.add_argument("--stride", type=int, default=1)
-    parser.add_argument("--modality", choices=("rgb", "thermal"), default="rgb")
     args = parser.parse_args(argv)
     tally = harvest(args.video, args.out, max_frames=args.max_frames,
-                    stride=args.stride, modality=args.modality)
+                    stride=args.stride)
     total = tally["pos"] + tally["neg"]
     print(f"{total} windows -> {args.out} "
           f"({tally['pos']} positive, {tally['neg']} negative)")

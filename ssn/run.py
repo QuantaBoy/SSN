@@ -17,6 +17,7 @@ import argparse
 import json
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 
 import cv2
 
@@ -64,7 +65,7 @@ class Mission:
 
 def build(width: int, height: int, hfov: float = 70.0, altitude: float = 3.0,
           weights: str | None = None, threshold: float = 0.5,
-          modality: str = "rgb", pose_at=None) -> Mission:
+          pose_at=None) -> Mission:
     """Assemble the onboard stage. `pose_at` is the FC telemetry / VIO hook.
 
     The default fixed hover pose is a stand-in for bench footage only. In flight
@@ -77,8 +78,7 @@ def build(width: int, height: int, hfov: float = 70.0, altitude: float = 3.0,
     return Mission(
         camera=Camera.from_fov(width, height, hfov),
         arena=arena,
-        pipeline=Pipeline(Proposer(), Tracker(), Verifier(model, threshold),
-                          modality=modality),
+        pipeline=Pipeline(Proposer(), Tracker(), Verifier(model, threshold)),
         pose_at=pose_at or (lambda _t: hover),
     )
 
@@ -116,8 +116,9 @@ def run(source, out_path: str | None = None, max_frames: int = 0,
 
     # handed to the SLAM mapping layer, which merges these into survivor positions
     report = {"frames": index, "fps": round(float(fps), 3),
-              "modality": mission.pipeline.modality, "detections": detections}
+              "detections": detections}
     if out_path:
+        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
         with open(out_path, "w", encoding="utf-8") as handle:
             json.dump(report, handle, indent=2)
     return report
@@ -126,9 +127,8 @@ def run(source, out_path: str | None = None, max_frames: int = 0,
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="run the SSN mission pipeline")
     parser.add_argument("source", help="video file path, or a webcam index")
-    parser.add_argument("--out", default="detections.json")
+    parser.add_argument("--out", default="output/detections.json")
     parser.add_argument("--weights", default=None, help="trained SSN checkpoint")
-    parser.add_argument("--modality", choices=("rgb", "thermal"), default="rgb")
     parser.add_argument("--max-frames", type=int, default=0)
     parser.add_argument("--altitude", type=float, default=3.0)
     parser.add_argument("--hfov", type=float, default=70.0)
@@ -146,7 +146,7 @@ def main(argv=None) -> int:
     capture.release()
 
     mission = build(width, height, args.hfov, args.altitude, args.weights,
-                    args.threshold, args.modality)
+                    args.threshold)
     report = run(args.source, args.out, args.max_frames, mission)
     cells = {d["cell"] for d in report["detections"] if d["cell"]}
     print(f"{report['frames']} frames, {len(report['detections'])} geotagged "
@@ -157,12 +157,10 @@ def main(argv=None) -> int:
 
 def _demo():
     import tempfile
-    from pathlib import Path
 
     import numpy as np
 
     from .model import T_STEPS
-    from .perception import to_gray
 
     tmp = Path(tempfile.mkdtemp())
     path = tmp / "clip.mp4"
@@ -196,20 +194,8 @@ def _demo():
         assert record["cell"] is not None
     saved = json.loads((tmp / "out.json").read_text())
     assert saved["detections"] == report["detections"]
-
-    # thermal frames are 16-bit on an arbitrary scale; the converter must map
-    # them onto the same 0-255 grey the RGB path produces
-    thermal = (rng.integers(2800, 3400, (240, 320)).astype(np.uint16))
-    thermal[100:190, 140:180] += 900
-    gray, bounds = to_gray(thermal, "thermal")
-    assert gray.dtype == np.uint8 and gray.max() > gray.min()
-    assert bounds is not None
-    # and the bounds must move only slowly, or the delta channel reads the
-    # normalisation as motion
-    shifted, moved = to_gray(thermal + 500, "thermal", bounds)
-    assert abs(moved[0] - bounds[0]) < 500, (bounds, moved)
     print(f"ok: {report['frames']} frames, {len(report['detections'])} detections, "
-          f"cell {report['detections'][0]['cell']}, thermal path ok")
+          f"cell {report['detections'][0]['cell']}")
 
 
 if __name__ == "__main__":

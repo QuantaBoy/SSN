@@ -2,6 +2,10 @@
 
 Send as one email. Keep it short; a numbered list gets answered, a paragraph does not.
 
+**Status:** the payload decision is made — RGB only, no thermal core. Question 1 still
+matters, but for teacher labelling (YOLOv8l has to recognise the targets as people), not
+for sensor procurement. Trim the LWIR framing before sending.
+
 ---
 
 **Subject:** Rescue Swarm — technical clarifications on survivor targets and mission envelope

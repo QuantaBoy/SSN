@@ -937,15 +937,15 @@
             <table>
               <thead><tr><th>Symbol</th><th>Role</th><th>Line</th></tr></thead>
               <tbody>
-                <tr><td class="sym">iou<span class="args">(a, b)</span></td><td>Box overlap. Used by the tracker and by label matching in <code>data.harvest</code>.</td><td class="ln">56</td></tr>
-                <tr><td class="sym">to_gray<span class="args">(frame, modality, bounds)</span></td><td>RGB or thermal in, one grey plane out. Thermal gets a percentile stretch whose bounds move only slowly — a per-frame stretch would flicker and <code>align</code> would read it as motion.</td><td class="ln">33</td></tr>
-                <tr><td class="sym">align<span class="args">(prev_gray, cur_gray)</span></td><td>Sparse LK flow → partial affine → warp → signed difference. Cancels camera motion so a still survivor survives the subtraction.</td><td class="ln">67</td></tr>
-                <tr><td class="sym">crop_pair<span class="args">(gray, delta, box)</span></td><td>Builds the 2-channel 64×64 sample in [−1, 1]: luma and ego-compensated delta.</td><td class="ln">90</td></tr>
-                <tr><td class="sym">Track</td><td>One candidate identity: box, hits, misses, and a <code>deque(maxlen=6)</code> of samples. <code>ready</code> is true only at a full window.</td><td class="ln">104</td></tr>
-                <tr><td class="sym">Tracker.update<span class="args">(boxes)</span></td><td>Greedy IoU association, ages out after <code>max_misses</code>, spawns new ids for unmatched boxes. No motion model by choice.</td><td class="ln">131</td></tr>
-                <tr><td class="sym">Proposer.__call__<span class="args">(frame)</span></td><td>YOLOv8n person boxes at confidence 0.15. Weights load lazily on first call.</td><td class="ln">168</td></tr>
-                <tr><td class="sym">Verifier.__call__<span class="args">(tracks)</span></td><td>Batches every ready track into one SSN call, writes back confidences, returns those over threshold.</td><td class="ln">188</td></tr>
-                <tr><td class="sym">Pipeline.step<span class="args">(frame)</span></td><td>Per-frame glue tying the five above together and holding <code>prev_gray</code>.</td><td class="ln">214</td></tr>
+                <tr><td class="sym">iou<span class="args">(a, b)</span></td><td>Box overlap. Used by the tracker and by label matching in <code>data.harvest</code>.</td><td class="ln">48</td></tr>
+                <tr><td class="sym">to_gray<span class="args">(frame)</span></td><td>BGR in, one grey plane out. RGB is the only input path; exposure is cancelled later, per crop in <code>crop_pair</code>, never per frame — a per-frame remap would flicker and <code>align</code> would read it as motion.</td><td class="ln">41</td></tr>
+                <tr><td class="sym">align<span class="args">(prev_gray, cur_gray)</span></td><td>Sparse LK flow → partial affine → warp → signed difference. Cancels camera motion so a still survivor survives the subtraction. Corners and flow run at <code>FLOW_SCALE</code> (half res) and only the translation column is rescaled back — a quarter of the pixels for the same residual.</td><td class="ln">59</td></tr>
+                <tr><td class="sym">crop_pair<span class="args">(gray, delta, box)</span></td><td>Builds the 2-channel 64×64 sample in [−1, 1]: luma and ego-compensated delta. The luma crop is standardised per crop, which cancels auto-exposure and auto-gain exactly; the delta crop is not, because rescaling a difference destroys the motion magnitude.</td><td class="ln">90</td></tr>
+                <tr><td class="sym">Track</td><td>One candidate identity: box, hits, misses, and a <code>deque(maxlen=6)</code> of samples. <code>ready</code> is true only at a full window.</td><td class="ln">118</td></tr>
+                <tr><td class="sym">Tracker.update<span class="args">(boxes)</span></td><td>Greedy IoU association, ages out after <code>max_misses</code>, spawns new ids for unmatched boxes. No motion model by choice.</td><td class="ln">146</td></tr>
+                <tr><td class="sym">Proposer.__call__<span class="args">(frame)</span></td><td>YOLOv8n person boxes at confidence 0.15. Weights load lazily on first call.</td><td class="ln">183</td></tr>
+                <tr><td class="sym">Verifier.__call__<span class="args">(tracks)</span></td><td>Batches ready tracks into one SSN call, writes back confidences, returns those over threshold. Ordered by hits, so when there are more candidates than <code>max_batch</code> the batch keeps the tracks that have survived the most association steps.</td><td class="ln">203</td></tr>
+                <tr><td class="sym">Pipeline.step<span class="args">(frame)</span></td><td>Per-frame glue tying the five above together and holding <code>prev_gray</code>.</td><td class="ln">233</td></tr>
               </tbody>
             </table>
           </div>
@@ -1074,7 +1074,7 @@
               <tbody>
                 <tr><td class="sym">time_ms<span class="args">(fn, repeats, warmup)</span></td><td>Warms up, then returns min / median / p95 / max. <code>min</code> is the comparator that survives scheduler noise.</td><td class="ln">30</td></tr>
                 <tr><td class="sym">bench_model<span class="args">(model, batches, repeats)</span></td><td>SSN forward at batch 1, 3 and 5.</td><td class="ln">47</td></tr>
-                <tr><td class="sym">bench_align</td><td>Times the per-frame ego-motion warp — in practice the largest single cost.</td><td class="ln">57</td></tr>
+                <tr><td class="sym">bench_align</td><td>Times the per-frame ego-motion warp.</td><td class="ln">57</td></tr>
                 <tr><td class="sym">bench_proposer</td><td>Times YOLOv8n with the weight load outside the timed region. Opt-in via <code>--proposer</code>.</td><td class="ln">64</td></tr>
                 <tr><td class="sym">main</td><td>Prints the table, sums a cycle p95, states the margin, and says plainly that the numbers do not transfer off this machine.</td><td class="ln">80</td></tr>
               </tbody>

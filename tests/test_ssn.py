@@ -9,9 +9,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from ssn import bench, data, localize, model, perception, run, train  # noqa: E402
+from ssn import (  # noqa: E402
+    bench, data, evaluate, localize, model, perception, run, train,
+)
 
-MODULES = [model, perception, localize, data, train, bench, run]
+MODULES = [model, perception, localize, data, train, evaluate, bench, run]
 
 
 def test_model():
@@ -32,6 +34,10 @@ def test_data():
 
 def test_train():
     train._demo()
+
+
+def test_evaluate():
+    evaluate._demo()
 
 
 def test_bench():

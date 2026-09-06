@@ -28,7 +28,7 @@ threshold while a one-frame artefact leaks away before it can fire.
 ```
 ONBOARD (this package)
   frame ──► ego-motion warp ──► YOLOv8n proposer ──► IoU tracker
-  RGB or thermal                                        │
+  RGB only                                              │
                                 6-frame window per track ▼
                                                 SSN spiking verifier
                                                         │
@@ -48,13 +48,17 @@ because it has the full trajectory and a better pose. `SurvivorRegistry` in
 
 | stage | module | cost (this machine, p95) |
 |---|---|---|
-| ego-motion warp | `ssn.perception.align` | 15.5 ms |
+| ego-motion warp | `ssn.perception.align` | 10.3 ms |
 | proposer | `ssn.perception.Proposer` | run `--proposer` to measure |
-| verifier, 5 candidates | `ssn.model.SSN` | 9.8 ms |
+| verifier, 5 candidates | `ssn.model.SSN` | 20.2 ms |
 | floor projection | `ssn.localize` | negligible |
 
-The warp costs more than the network. If the Pi 5 runs tight, cut the flow
-estimate to quarter resolution before touching the SSN.
+Corners and optical flow run at `FLOW_SCALE` (half resolution) and the resulting
+affine is applied at full resolution — a quarter of the pixels for the same warp
+quality, because one frame of drone motion is many pixels wide. On 640x480
+textured frames that is 4.7 ms against 91 ms full-resolution, with the same
+residual after compensation. If the Pi 5 still runs tight, drop `FLOW_SCALE` to
+0.25 before touching the SSN.
 
 ## Install
 
@@ -69,24 +73,58 @@ On the aircraft use `opencv-python-headless`, and export the proposer to NCNN
 
 ```bash
 # 1. harvest labelled windows from footage (YOLOv8l teacher labels the student's candidates)
-python -m ssn.data flight.mp4 --out dataset --modality rgb
+python -m ssn.data flight.mp4 --out dataset
 
 # 2. train, scored on false positives removed at matched recall
 python -m ssn.train --data dataset --epochs 40 --out ssn.pt
 
-# 3. measure latency on the hardware you will actually fly
+# 3. score the checkpoint - writes output/ (see below)
+python -m ssn.evaluate --data dataset --weights ssn.pt
+
+# 4. measure latency on the hardware you will actually fly
 python -m ssn.bench --proposer
 
-# 4. run the onboard stage
-python -m ssn.run flight.mp4 --weights ssn.pt --modality rgb --out detections.json
+# 5. run the onboard stage
+python -m ssn.run flight.mp4 --weights ssn.pt
 ```
 
-`--modality thermal` switches the input path: thermal cores return radiometric
-counts on an arbitrary scale, so they get a percentile stretch whose bounds move
-only slowly between frames. A per-frame stretch would make the normalisation
-itself flicker and the ego-motion channel would read that as scene movement.
-Harvest and run must use the same modality or the network trains on an input
-distribution it never meets in flight.
+## Where the output goes
+
+Everything readable after the run lands in `output/`, created on demand and
+gitignored:
+
+| file | written by | what it holds |
+|---|---|---|
+| `output/report.txt` | `ssn.evaluate` | the formatted scorecard — sklearn metrics at both thresholds, `classification_report`, per-clip breakdown |
+| `output/metrics.json` | `ssn.evaluate` | the same numbers, machine-readable |
+| `output/curves.png` | `ssn.evaluate` | ROC and precision-recall, mission operating point marked |
+| `output/scores.npz` | `ssn.evaluate` | raw `y_true` / `y_score` / clip per validation window, to re-plot without re-scoring |
+| `output/detections.json` | `ssn.run` | geotagged detections, handed to the SLAM mapping layer |
+
+The trained checkpoint stays at `ssn.pt` in the project root — it is a thing you
+deploy, not a thing you read.
+
+RGB is the only input path. A visible-light camera is the whole payload, so both
+channels the network reads have to come out of luma and motion, and the two
+places that costs accuracy are handled in `ssn.perception`:
+
+- **the luma crop is standardised per crop** (`crop_pair`). Auto-exposure and
+  auto-gain change luma by an affine map; subtracting the crop mean and dividing
+  by its spread cancels exactly that map, so the same candidate in an unlit room
+  and in a window-lit corridor reaches the network as the same tensor. The delta
+  channel is deliberately left alone — a difference has no exposure to remove,
+  and rescaling it would destroy the magnitude that separates a moving survivor
+  from sensor noise.
+- **the verification batch is ordered by track age** (`Verifier`). A
+  low-confidence RGB proposer in rubble routinely returns more candidates than
+  one batch holds; taking them in list order drops whichever the proposer
+  happened to emit last, so the batch takes the tracks that have survived the
+  most frames of association instead.
+
+`ssn.data.augment` therefore does **not** simulate exposure or gain: `crop_pair`
+already cancels it, and simulating it would teach the network to undo it twice.
+Blown highlights and crushed blacks are not affine and remain a real gap — they
+need footage shot against a bright doorway, not an augmentation.
 
 Without `--weights` the verifier has random weights and its output is noise.
 `run.py` says so on stderr rather than quietly emitting confident nonsense.
@@ -101,6 +139,18 @@ false positives it removed. Gate B asks for ≥30%.
 
 Recall is held near 1.0 rather than traded away. A missed survivor in a collapsed
 building is not a metric.
+
+`ssn.evaluate` reports that alongside the standard `sklearn.metrics` set —
+precision, recall, F1, balanced accuracy, confusion matrix, ROC-AUC and average
+precision — at two thresholds. **0.5 is not the operating point.** It is what
+sklearn assumes by default; the threshold that flies is the one `matched_recall`
+picks, the highest cut still keeping 98% of survivors. Compare runs on ROC-AUC
+and average precision, which do not depend on where that cut lands.
+
+Per clip matters as much as the total. Positives and negatives are not spread
+evenly across source clips, so a model that learned only *which clip a window
+came from* posts the same overall number as one that learned to recognise a
+person. A clip holding both classes is the honest row.
 
 ## Design decisions worth knowing
 

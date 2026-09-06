@@ -1,4 +1,5 @@
 __pycache__/
+.env
 *.pt
 *.mp4
 *.npz
@@ -6,3 +7,4 @@ data/
 dataset/
 events.jsonl
 survivors.json
+output/
