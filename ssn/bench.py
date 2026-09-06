@@ -45,12 +45,14 @@ def time_ms(fn, repeats: int = 20, warmup: int = 3) -> dict:
 
 
 def bench_model(model: SSN, batches=(1, 3, 5), repeats: int = 20) -> dict:
-    torch.set_grad_enabled(False)
+    # scoped, not torch.set_grad_enabled(False) - that is global and would leak
+    # out of here, silently breaking any training that runs later in the process
     model.eval()
     out = {}
-    for batch in batches:
-        x = torch.randn(batch, T_STEPS, 2, CROP, CROP)
-        out[batch] = time_ms(lambda: model(x), repeats)
+    with torch.no_grad():
+        for batch in batches:
+            x = torch.randn(batch, T_STEPS, 2, CROP, CROP)
+            out[batch] = time_ms(lambda: model(x), repeats)
     return out
 
 
