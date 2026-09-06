@@ -1,0 +1,1192 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SSN Architecture</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+<style>
+  :root {
+    --ground: #F6F7F9;
+    --surface: #FFFFFF;
+    --surface-2: #EDEFF3;
+    --ink: #14181F;
+    --ink-2: #4A5260;
+    --ink-3: #79828F;
+    --rule: #DCE0E7;
+    --rule-strong: #C3CAD4;
+    --accent: #B5560C;
+    --accent-soft: #FBEDE0;
+    --signal: #0F6E6E;
+    --signal-soft: #E2F0EF;
+    --pos: #1F6B3A;
+    --neg: #A32E24;
+    --sans: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Consolas, monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #0F1218;
+      --surface: #161A22;
+      --surface-2: #1E2431;
+      --ink: #E6E9EE;
+      --ink-2: #A3ACBA;
+      --ink-3: #6E7787;
+      --rule: #262D3A;
+      --rule-strong: #38414F;
+      --accent: #E8933F;
+      --accent-soft: #2A1E12;
+      --signal: #3FB3AC;
+      --signal-soft: #102A2A;
+      --pos: #4FB477;
+      --neg: #E0705F;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground: #0F1218;
+    --surface: #161A22;
+    --surface-2: #1E2431;
+    --ink: #E6E9EE;
+    --ink-2: #A3ACBA;
+    --ink-3: #6E7787;
+    --rule: #262D3A;
+    --rule-strong: #38414F;
+    --accent: #E8933F;
+    --accent-soft: #2A1E12;
+    --signal: #3FB3AC;
+    --signal-soft: #102A2A;
+    --pos: #4FB477;
+    --neg: #E0705F;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 15px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 0 28px 96px;
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 0 44px;
+  }
+
+  /* ---------- masthead ---------- */
+
+  .masthead {
+    grid-column: 1 / -1;
+    padding: 56px 0 32px;
+    border-bottom: 2px solid var(--ink);
+  }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 18px;
+  }
+
+  h1 {
+    font-size: clamp(32px, 5vw, 46px);
+    line-height: 1.08;
+    letter-spacing: -0.02em;
+    font-weight: 600;
+    margin: 0 0 16px;
+    text-wrap: balance;
+  }
+
+  .standfirst {
+    font-size: 17px;
+    line-height: 1.55;
+    color: var(--ink-2);
+    max-width: 62ch;
+    margin: 0;
+  }
+
+  .facts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0;
+    margin-top: 32px;
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    background: var(--surface);
+    overflow: hidden;
+  }
+
+  .fact {
+    flex: 1 1 150px;
+    padding: 14px 18px;
+    border-right: 1px solid var(--rule);
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .fact:last-child { border-right: none; }
+
+  .fact dt {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    margin: 0;
+  }
+
+  .fact dd {
+    margin: 0;
+    font-family: var(--mono);
+    font-size: 19px;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    color: var(--ink);
+  }
+
+  .fact dd .unit {
+    font-size: 12px;
+    color: var(--ink-3);
+    font-weight: 400;
+  }
+
+  /* ---------- nav rail ---------- */
+
+  nav.rail { display: none; }
+
+  @media (min-width: 1040px) {
+    .wrap { grid-template-columns: 176px minmax(0, 1fr); }
+    .masthead { grid-column: 1 / -1; }
+    nav.rail {
+      display: block;
+      position: sticky;
+      top: 24px;
+      align-self: start;
+      padding-top: 44px;
+      max-height: calc(100vh - 48px);
+      overflow-y: auto;
+    }
+    main { min-width: 0; }
+  }
+
+  nav.rail p {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    margin: 0 0 10px;
+  }
+
+  nav.rail ol {
+    list-style: none;
+    margin: 0 0 26px;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+
+  nav.rail a {
+    display: block;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    color: var(--ink-2);
+    text-decoration: none;
+    padding: 3px 0 3px 10px;
+    border-left: 2px solid var(--rule);
+  }
+
+  nav.rail a:hover { color: var(--accent); border-left-color: var(--accent); }
+  nav.rail a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  /* ---------- sections ---------- */
+
+  main { grid-column: 1 / -1; }
+  @media (min-width: 1040px) { main { grid-column: 2; } }
+
+  section { padding-top: 52px; scroll-margin-top: 20px; }
+
+  h2 {
+    font-size: 12px;
+    font-family: var(--mono);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    font-weight: 500;
+    margin: 0 0 22px;
+    padding-bottom: 9px;
+    border-bottom: 1px solid var(--rule);
+  }
+
+  h3 {
+    font-size: 21px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    margin: 0 0 6px;
+  }
+
+  p { margin: 0 0 15px; max-width: 68ch; }
+  p.lede { color: var(--ink-2); }
+  main a { color: var(--accent); }
+
+  code {
+    font-family: var(--mono);
+    font-size: 0.88em;
+    background: var(--surface-2);
+    padding: 1px 5px;
+    border-radius: 2px;
+  }
+
+  /* ---------- figures ---------- */
+
+  figure {
+    margin: 0 0 30px;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    padding: 22px 22px 16px;
+    overflow-x: auto;
+  }
+
+  figure svg { display: block; max-width: 100%; height: auto; min-width: 520px; }
+
+  figcaption {
+    margin-top: 14px;
+    padding-top: 12px;
+    border-top: 1px solid var(--rule);
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--ink-2);
+    max-width: 74ch;
+  }
+
+  figcaption b { color: var(--ink); font-weight: 600; }
+
+  .svg-box { fill: var(--surface); stroke: var(--rule-strong); stroke-width: 1.5; }
+  .svg-box-accent { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.5; }
+  .svg-box-signal { fill: var(--signal-soft); stroke: var(--signal); stroke-width: 1.5; }
+  .svg-t { font-family: var(--mono); font-size: 12px; fill: var(--ink); }
+  .svg-t-sm { font-family: var(--mono); font-size: 10px; fill: var(--ink-3); }
+  .svg-t-edge { font-family: var(--mono); font-size: 10px; fill: var(--ink-2); }
+  .svg-line { stroke: var(--ink-3); stroke-width: 1.4; fill: none; }
+  .svg-line-accent { stroke: var(--accent); stroke-width: 1.8; fill: none; }
+
+  /* ---------- module cards ---------- */
+
+  .module {
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    background: var(--surface);
+    margin-bottom: 20px;
+    overflow: hidden;
+  }
+
+  .module > header {
+    padding: 16px 20px 14px;
+    border-bottom: 1px solid var(--rule);
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 10px 14px;
+  }
+
+  .module > header h3 {
+    font-family: var(--mono);
+    font-size: 16px;
+    font-weight: 600;
+    margin: 0;
+  }
+
+  .layer-tag {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 2px 7px;
+    border-radius: 2px;
+    background: var(--surface-2);
+    color: var(--ink-2);
+    border: 1px solid var(--rule);
+  }
+
+  .layer-tag.leaf { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
+
+  .module > header .role {
+    flex: 1 1 260px;
+    font-size: 13.5px;
+    color: var(--ink-2);
+    margin: 0;
+    max-width: none;
+  }
+
+  .module-body { padding: 18px 20px 6px; }
+  .module-body p { font-size: 14px; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+
+  .table-scroll { overflow-x: auto; margin: 0 0 6px; }
+
+  th {
+    text-align: left;
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    font-weight: 500;
+    padding: 0 12px 7px 0;
+    border-bottom: 1px solid var(--rule);
+    white-space: nowrap;
+  }
+
+  td {
+    padding: 9px 12px 9px 0;
+    border-bottom: 1px solid var(--rule);
+    vertical-align: top;
+    color: var(--ink-2);
+  }
+
+  tr:last-child td { border-bottom: none; }
+
+  td.sym {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    color: var(--ink);
+    white-space: nowrap;
+    font-weight: 500;
+  }
+
+  td.sym .args { color: var(--ink-3); font-weight: 400; }
+  td.ln {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--ink-3);
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    width: 1%;
+  }
+
+  .wires {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 26px;
+    padding: 14px 20px;
+    border-top: 1px solid var(--rule);
+    background: var(--surface-2);
+    font-size: 12.5px;
+  }
+
+  .wire { display: flex; gap: 8px; align-items: baseline; }
+
+  .wire dt {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    white-space: nowrap;
+  }
+
+  .wire dd { margin: 0; font-family: var(--mono); font-size: 12px; color: var(--ink-2); }
+  .wire dd .none { color: var(--ink-3); font-style: italic; font-family: var(--sans); }
+
+  /* ---------- callouts ---------- */
+
+  .note {
+    border-left: 3px solid var(--accent);
+    background: var(--accent-soft);
+    padding: 14px 18px;
+    border-radius: 0 3px 3px 0;
+    margin: 0 0 24px;
+  }
+
+  .note p { margin: 0; font-size: 14px; color: var(--ink); }
+  .note p + p { margin-top: 9px; }
+  .note strong { font-weight: 600; }
+
+  /* ---------- entry points ---------- */
+
+  .cmds { display: flex; flex-direction: column; gap: 10px; margin-bottom: 26px; }
+
+  .cmd {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 4px;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    padding: 13px 16px;
+  }
+
+  @media (min-width: 660px) {
+    .cmd { grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); gap: 18px; align-items: baseline; }
+  }
+
+  .cmd code {
+    background: none;
+    padding: 0;
+    font-size: 12.5px;
+    color: var(--ink);
+    overflow-wrap: anywhere;
+  }
+
+  .cmd code .flag { color: var(--accent); }
+  .cmd span { font-size: 13px; color: var(--ink-2); }
+
+  footer {
+    grid-column: 1 / -1;
+    margin-top: 60px;
+    padding-top: 20px;
+    border-top: 1px solid var(--rule);
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--ink-3);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 24px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+</style>
+<style>
+  html { color-scheme: light dark; }
+  body { margin: 0; }
+  img { max-width: 100%; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="masthead">
+    <p class="eyebrow">NIDAR AirMouse · perception stack · tag v2</p>
+    <h1>SSN Architecture</h1>
+    <p class="standfirst">
+      Seven modules that take a drone camera frame and return the grid cell a survivor is lying in.
+      This is what each file does, which functions call which, and why the pieces are split where they are.
+    </p>
+    <dl class="facts">
+      <div class="fact"><dt>Modules</dt><dd>7</dd></div>
+      <div class="fact"><dt>Verifier params</dt><dd>23,729</dd></div>
+      <div class="fact"><dt>Cycle p95</dt><dd>25.3<span class="unit"> ms</span></dd></div>
+      <div class="fact"><dt>Frame budget</dt><dd>120<span class="unit"> ms</span></dd></div>
+      <div class="fact"><dt>Window</dt><dd>6<span class="unit"> frames</span></dd></div>
+      <div class="fact"><dt>Self-checks</dt><dd>7 / 7</dd></div>
+    </dl>
+  </header>
+
+  <nav class="rail" aria-label="Contents">
+    <p>Flow</p>
+    <ol>
+      <li><a href="#runtime">Runtime path</a></li>
+      <li><a href="#layers">Dependencies</a></li>
+      <li><a href="#membrane">Why spiking</a></li>
+      <li><a href="#training">Training path</a></li>
+    </ol>
+    <p>Modules</p>
+    <ol>
+      <li><a href="#model">model.py</a></li>
+      <li><a href="#perception">perception.py</a></li>
+      <li><a href="#localize">localize.py</a></li>
+      <li><a href="#data">data.py</a></li>
+      <li><a href="#train">train.py</a></li>
+      <li><a href="#bench">bench.py</a></li>
+      <li><a href="#run">run.py</a></li>
+    </ol>
+    <p>Reference</p>
+    <ol>
+      <li><a href="#entry">Entry points</a></li>
+      <li><a href="#constants">Constants</a></li>
+    </ol>
+  </nav>
+
+  <main>
+
+    <!-- ===================== RUNTIME ===================== -->
+    <section id="runtime">
+      <h2>Runtime path — one frame</h2>
+      <p class="lede">
+        Every frame walks the same seven stops. The proposer is deliberately over-eager and the
+        verifier is what makes the output trustworthy; nothing is ever reported from a single frame.
+      </p>
+
+      <figure>
+        <svg viewBox="0 0 1060 268" role="img" aria-label="Dataflow for one frame: the frame goes to the YOLOv8n proposer producing boxes, then a greedy IoU tracker producing tracks, then crop_pair which also consumes an ego-motion delta computed by align from the previous frame, then the SSN verifier which only fires on a full six-frame window, then locate which projects to the floor, then the survivor registry which emits a grid cell.">
+          <defs>
+            <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+            </marker>
+          </defs>
+
+          <!-- main row boxes -->
+          <g>
+            <rect class="svg-box" x="16" y="40" width="128" height="52" rx="2"/>
+            <text class="svg-t" x="80" y="62" text-anchor="middle">frame t</text>
+            <text class="svg-t-sm" x="80" y="78" text-anchor="middle">BGR 640×480</text>
+
+            <rect class="svg-box" x="166" y="40" width="128" height="52" rx="2"/>
+            <text class="svg-t" x="230" y="62" text-anchor="middle">Proposer</text>
+            <text class="svg-t-sm" x="230" y="78" text-anchor="middle">YOLOv8n @ 0.15</text>
+
+            <rect class="svg-box" x="316" y="40" width="128" height="52" rx="2"/>
+            <text class="svg-t" x="380" y="62" text-anchor="middle">Tracker</text>
+            <text class="svg-t-sm" x="380" y="78" text-anchor="middle">greedy IoU</text>
+
+            <rect class="svg-box" x="466" y="40" width="128" height="52" rx="2"/>
+            <text class="svg-t" x="530" y="62" text-anchor="middle">crop_pair</text>
+            <text class="svg-t-sm" x="530" y="78" text-anchor="middle">2 × 64 × 64</text>
+
+            <rect class="svg-box-accent" x="616" y="40" width="128" height="52" rx="2"/>
+            <text class="svg-t" x="680" y="62" text-anchor="middle">Verifier</text>
+            <text class="svg-t-sm" x="680" y="78" text-anchor="middle">SSN, 6-step vote</text>
+
+            <rect class="svg-box" x="766" y="40" width="128" height="52" rx="2"/>
+            <text class="svg-t" x="830" y="62" text-anchor="middle">locate</text>
+            <text class="svg-t-sm" x="830" y="78" text-anchor="middle">ray → floor</text>
+
+            <rect class="svg-box" x="916" y="40" width="128" height="52" rx="2"/>
+            <text class="svg-t" x="980" y="62" text-anchor="middle">Registry</text>
+            <text class="svg-t-sm" x="980" y="78" text-anchor="middle">merge + cap 6</text>
+          </g>
+
+          <!-- main row arrows -->
+          <g color="var(--ink-3)">
+            <line class="svg-line" x1="144" y1="66" x2="160" y2="66" marker-end="url(#ar)"/>
+            <line class="svg-line" x1="294" y1="66" x2="310" y2="66" marker-end="url(#ar)"/>
+            <line class="svg-line" x1="444" y1="66" x2="460" y2="66" marker-end="url(#ar)"/>
+            <line class="svg-line" x1="594" y1="66" x2="610" y2="66" marker-end="url(#ar)"/>
+            <line class="svg-line" x1="744" y1="66" x2="760" y2="66" marker-end="url(#ar)"/>
+            <line class="svg-line" x1="894" y1="66" x2="910" y2="66" marker-end="url(#ar)"/>
+          </g>
+
+          <!-- edge labels above -->
+          <text class="svg-t-edge" x="230" y="28" text-anchor="middle">boxes ≥ 0.15</text>
+          <text class="svg-t-edge" x="380" y="28" text-anchor="middle">tracks + id</text>
+          <text class="svg-t-edge" x="530" y="28" text-anchor="middle">window ×6</text>
+          <text class="svg-t-edge" x="680" y="28" text-anchor="middle">conf ≥ τ</text>
+          <text class="svg-t-edge" x="830" y="28" text-anchor="middle">x, y on floor</text>
+
+          <!-- ego-motion side lane -->
+          <rect class="svg-box" x="166" y="176" width="128" height="52" rx="2"/>
+          <text class="svg-t" x="230" y="198" text-anchor="middle">frame t−1</text>
+          <text class="svg-t-sm" x="230" y="214" text-anchor="middle">held in Pipeline</text>
+
+          <rect class="svg-box-signal" x="336" y="176" width="128" height="52" rx="2"/>
+          <text class="svg-t" x="400" y="198" text-anchor="middle">align</text>
+          <text class="svg-t-sm" x="400" y="214" text-anchor="middle">LK → affine warp</text>
+
+          <g color="var(--ink-3)">
+            <line class="svg-line" x1="294" y1="202" x2="330" y2="202" marker-end="url(#ar)"/>
+            <path class="svg-line" d="M 464 202 L 530 202 L 530 98" marker-end="url(#ar)"/>
+          </g>
+          <text class="svg-t-edge" x="545" y="150">delta channel</text>
+
+          <!-- gate note -->
+          <path class="svg-line" d="M 680 98 L 680 128 L 600 128" stroke-dasharray="3 3" marker-end="url(#ar)" color="var(--ink-3)"/>
+          <text class="svg-t-edge" x="592" y="132" text-anchor="end">not ready → hold</text>
+
+          <!-- output -->
+          <text class="svg-t-edge" x="980" y="120" text-anchor="middle">JSON event</text>
+          <line class="svg-line" x1="980" y1="98" x2="980" y2="108" marker-end="url(#ar)" color="var(--ink-3)"/>
+        </svg>
+        <figcaption>
+          <b>One warp per frame, not one per candidate.</b> <code>align</code> runs once on the whole
+          image and every crop reads from the same delta — the difference between affordable and not
+          on a Pi 5. A track that has fewer than six frames is held, not guessed at, so the first
+          possible report is on frame six.
+        </figcaption>
+      </figure>
+
+      <div class="note">
+        <p>
+          <strong>Why a second stage exists at all.</strong> Set YOLOv8n low enough to catch a prone,
+          half-buried, badly lit survivor and it also returns debris, mannequin limbs and motion blur.
+          Set it high enough to reject those and it misses people. So the proposer stays at high recall
+          and the SSN decides what was real, using the one signal a single frame cannot carry:
+          <strong>a survivor is present in every frame, an artefact is not.</strong>
+        </p>
+      </div>
+    </section>
+
+    <!-- ===================== LAYERS ===================== -->
+    <section id="layers">
+      <h2>Dependency layers</h2>
+      <p class="lede">
+        Two modules import nothing from the package. Everything else stacks on them, which is what
+        makes <code>model.py</code> and <code>localize.py</code> independently testable — and why the
+        geometry can be verified without a network and the network without a camera.
+      </p>
+
+      <figure>
+        <svg viewBox="0 0 660 336" role="img" aria-label="Dependency layers: train.py sits on data.py; data.py, bench.py and run.py all sit on perception.py; perception.py sits on model.py. model.py is a wide foundation bar imported by every module. localize.py is a second independent foundation used only by run.py.">
+          <defs>
+            <marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+            </marker>
+          </defs>
+
+          <text class="svg-t-sm" x="8" y="34">entry</text>
+          <rect class="svg-box" x="70" y="18" width="126" height="44" rx="2"/>
+          <text class="svg-t" x="133" y="45" text-anchor="middle">train.py</text>
+
+          <text class="svg-t-sm" x="8" y="122">uses</text>
+          <rect class="svg-box" x="70" y="106" width="126" height="44" rx="2"/>
+          <text class="svg-t" x="133" y="133" text-anchor="middle">data.py</text>
+          <rect class="svg-box" x="236" y="106" width="126" height="44" rx="2"/>
+          <text class="svg-t" x="299" y="133" text-anchor="middle">bench.py</text>
+          <rect class="svg-box" x="402" y="106" width="126" height="44" rx="2"/>
+          <text class="svg-t" x="465" y="133" text-anchor="middle">run.py</text>
+
+          <text class="svg-t-sm" x="8" y="210">core</text>
+          <rect class="svg-box-accent" x="236" y="194" width="126" height="44" rx="2"/>
+          <text class="svg-t" x="299" y="221" text-anchor="middle">perception.py</text>
+
+          <text class="svg-t-sm" x="8" y="298">leaf</text>
+          <rect class="svg-box-signal" x="70" y="282" width="292" height="44" rx="2"/>
+          <text class="svg-t" x="216" y="303" text-anchor="middle">model.py</text>
+          <text class="svg-t-sm" x="216" y="318" text-anchor="middle">imported by all six</text>
+
+          <rect class="svg-box-signal" x="402" y="282" width="126" height="44" rx="2"/>
+          <text class="svg-t" x="465" y="303" text-anchor="middle">localize.py</text>
+          <text class="svg-t-sm" x="465" y="318" text-anchor="middle">geometry only</text>
+
+          <g color="var(--ink-3)">
+            <!-- train -> data -->
+            <line class="svg-line" x1="133" y1="62" x2="133" y2="100" marker-end="url(#ar2)"/>
+            <!-- data -> perception -->
+            <path class="svg-line" d="M 150 150 L 150 172 L 270 172 L 270 188" marker-end="url(#ar2)"/>
+            <!-- bench -> perception -->
+            <line class="svg-line" x1="299" y1="150" x2="299" y2="188" marker-end="url(#ar2)"/>
+            <!-- run -> perception -->
+            <path class="svg-line" d="M 448 150 L 448 172 L 330 172 L 330 188" marker-end="url(#ar2)"/>
+            <!-- perception -> model -->
+            <line class="svg-line" x1="299" y1="238" x2="299" y2="276" marker-end="url(#ar2)"/>
+            <!-- run -> localize -->
+            <line class="svg-line" x1="482" y1="150" x2="482" y2="276" marker-end="url(#ar2)"/>
+            <!-- train -> model along left rail -->
+            <path class="svg-line" d="M 70 40 L 40 40 L 40 296 L 64 296" stroke-dasharray="4 3" marker-end="url(#ar2)"/>
+          </g>
+          <text class="svg-t-edge" x="46" y="176">imports SSN direct</text>
+          <text class="svg-t-edge" x="492" y="200">Camera, Pose, Arena</text>
+        </svg>
+        <figcaption>
+          <b>Arrows read “imports”.</b> <code>model.py</code> is the substrate every other module
+          touches; <code>localize.py</code> is a separate foundation that only the mission runtime
+          needs. Nothing imports upward, so there are no cycles and any module can be exercised in
+          isolation — which is exactly how the seven self-checks run.
+        </figcaption>
+      </figure>
+    </section>
+
+    <!-- ===================== MEMBRANE ===================== -->
+    <section id="membrane">
+      <h2>Why the verifier spikes</h2>
+      <p class="lede">
+        The LIF membrane is the whole architectural bet, and it is small enough to trace by hand.
+        Below is the real membrane potential from <code>ssn.model.LIF</code> at its initialised decay
+        of 0.5, driven two ways at identical amplitude.
+      </p>
+
+      <figure>
+        <svg viewBox="0 0 620 288" role="img" aria-label="Membrane potential over six timesteps. Persistent drive of 0.6 per frame climbs and crosses the firing threshold of 1.0 at step 3 and again at step 6. A single 0.6 pulse at step 1 decays to 0.02 by step 6 and never fires.">
+          <defs>
+            <marker id="ar3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+            </marker>
+          </defs>
+
+          <!-- axes -->
+          <line class="svg-line" x1="52" y1="30" x2="52" y2="212" stroke="var(--rule-strong)"/>
+          <line class="svg-line" x1="52" y1="212" x2="540" y2="212" stroke="var(--rule-strong)"/>
+
+          <!-- y ticks -->
+          <text class="svg-t-sm" x="44" y="215" text-anchor="end">0</text>
+          <text class="svg-t-sm" x="44" y="140" text-anchor="end">0.5</text>
+          <text class="svg-t-sm" x="44" y="64" text-anchor="end">1.0</text>
+          <text class="svg-t-sm" x="14" y="120" transform="rotate(-90 14 120)" text-anchor="middle">membrane v</text>
+
+          <!-- threshold -->
+          <line x1="52" y1="62" x2="540" y2="62" stroke="var(--accent)" stroke-width="1.2" stroke-dasharray="5 4"/>
+          <text class="svg-t-edge" x="540" y="55" text-anchor="end" fill="var(--accent)">v_th = 1.0 · fires</text>
+
+          <!-- x ticks -->
+          <text class="svg-t-sm" x="60" y="230" text-anchor="middle">1</text>
+          <text class="svg-t-sm" x="140" y="230" text-anchor="middle">2</text>
+          <text class="svg-t-sm" x="220" y="230" text-anchor="middle">3</text>
+          <text class="svg-t-sm" x="300" y="230" text-anchor="middle">4</text>
+          <text class="svg-t-sm" x="380" y="230" text-anchor="middle">5</text>
+          <text class="svg-t-sm" x="460" y="230" text-anchor="middle">6</text>
+          <text class="svg-t-sm" x="260" y="248" text-anchor="middle">frame in window</text>
+
+          <!-- persistent trace: 0.6 0.9 1.05 0.625 0.9125 1.0563 -->
+          <polyline class="svg-line-accent" points="60,120 140,75 220,52.5 300,116.3 380,73.1 460,51.6"/>
+          <g fill="var(--accent)">
+            <circle cx="60" cy="120" r="3"/><circle cx="140" cy="75" r="3"/>
+            <circle cx="220" cy="52.5" r="4.5"/><circle cx="300" cy="116.3" r="3"/>
+            <circle cx="380" cy="73.1" r="3"/><circle cx="460" cy="51.6" r="4.5"/>
+          </g>
+          <text class="svg-t-edge" x="220" y="42" text-anchor="middle" fill="var(--accent)">spike</text>
+          <text class="svg-t-edge" x="460" y="42" text-anchor="middle" fill="var(--accent)">spike</text>
+          <text class="svg-t" x="474" y="56" fill="var(--accent)">survivor</text>
+
+          <!-- transient trace: 0.6 0.3 0.15 0.075 0.0375 0.0188 -->
+          <polyline class="svg-line" points="60,120 140,165 220,187.5 300,198.8 380,204.4 460,207.2" stroke="var(--ink-3)" stroke-width="1.8"/>
+          <g fill="var(--ink-3)">
+            <circle cx="60" cy="120" r="3"/><circle cx="140" cy="165" r="3"/>
+            <circle cx="220" cy="187.5" r="3"/><circle cx="300" cy="198.8" r="3"/>
+            <circle cx="380" cy="204.4" r="3"/><circle cx="460" cy="207.2" r="3"/>
+          </g>
+          <text class="svg-t" x="474" y="211" fill="var(--ink-3)">artefact</text>
+
+          <text class="svg-t-edge" x="70" y="112">both start at 0.6</text>
+          <line class="svg-line" x1="66" y1="116" x2="60" y2="120" stroke="var(--ink-3)"/>
+
+          <text class="svg-t-edge" x="238" y="268">persistent 0.6 each frame → 2 spikes · one 0.6 pulse then nothing → 0 spikes, v decays to 0.02</text>
+        </svg>
+        <figcaption>
+          <b>Real values from <code>LIF</code> at decay 0.5, not an illustration.</b> Evidence that
+          repeats accumulates faster than it leaks and crosses threshold; the same evidence arriving
+          once leaks away to 2% of its peak within the window. This is the inductive bias the
+          architecture is built on — the learned convolutions decide <em>what</em> counts as evidence,
+          the membrane decides whether it <em>lasted</em>.
+        </figcaption>
+      </figure>
+    </section>
+
+    <!-- ===================== TRAINING ===================== -->
+    <section id="training">
+      <h2>Training path</h2>
+      <p class="lede">
+        Labels come from a teacher-student split: the same low-confidence proposer that will fly
+        decides what gets looked at, and a heavier YOLOv8l decides what was really there. Training on
+        the student's own candidate distribution is the point — a set of tidy person crops would
+        teach nothing about the debris it must reject.
+      </p>
+
+      <figure>
+        <svg viewBox="0 0 1000 250" role="img" aria-label="Training path: footage goes to harvest, which runs the student proposer and tracker to make candidate windows and the YOLOv8l teacher to label them, writing npz files. SequenceDataset applies coherent augmentation, the train loop optimises the SSN, matched recall scores it, and the resulting checkpoint feeds back into the runtime verifier.">
+          <defs>
+            <marker id="ar4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+            </marker>
+          </defs>
+
+          <rect class="svg-box" x="16" y="72" width="120" height="50" rx="2"/>
+          <text class="svg-t" x="76" y="93" text-anchor="middle">footage</text>
+          <text class="svg-t-sm" x="76" y="109" text-anchor="middle">maze .mp4</text>
+
+          <rect class="svg-box" x="176" y="72" width="130" height="50" rx="2"/>
+          <text class="svg-t" x="241" y="93" text-anchor="middle">harvest</text>
+          <text class="svg-t-sm" x="241" y="109" text-anchor="middle">student + teacher</text>
+
+          <rect class="svg-box" x="346" y="72" width="120" height="50" rx="2"/>
+          <text class="svg-t" x="406" y="93" text-anchor="middle">.npz</text>
+          <text class="svg-t-sm" x="406" y="109" text-anchor="middle">window + label</text>
+
+          <rect class="svg-box-signal" x="506" y="72" width="140" height="50" rx="2"/>
+          <text class="svg-t" x="576" y="93" text-anchor="middle">augment</text>
+          <text class="svg-t-sm" x="576" y="109" text-anchor="middle">coherent per window</text>
+
+          <rect class="svg-box-accent" x="686" y="72" width="130" height="50" rx="2"/>
+          <text class="svg-t" x="751" y="93" text-anchor="middle">train</text>
+          <text class="svg-t-sm" x="751" y="109" text-anchor="middle">BCE + pos_weight</text>
+
+          <rect class="svg-box" x="856" y="72" width="128" height="50" rx="2"/>
+          <text class="svg-t" x="920" y="93" text-anchor="middle">ssn.pt</text>
+          <text class="svg-t-sm" x="920" y="109" text-anchor="middle">best checkpoint</text>
+
+          <!-- teacher below harvest -->
+          <rect class="svg-box" x="176" y="176" width="130" height="46" rx="2"/>
+          <text class="svg-t" x="241" y="196" text-anchor="middle">YOLOv8l</text>
+          <text class="svg-t-sm" x="241" y="211" text-anchor="middle">teacher @ 0.5</text>
+
+          <!-- metric below train -->
+          <rect class="svg-box" x="660" y="176" width="182" height="46" rx="2"/>
+          <text class="svg-t" x="751" y="196" text-anchor="middle">matched_recall</text>
+          <text class="svg-t-sm" x="751" y="211" text-anchor="middle">FP removed @ 98% recall</text>
+
+          <g color="var(--ink-3)">
+            <line class="svg-line" x1="136" y1="97" x2="170" y2="97" marker-end="url(#ar4)"/>
+            <line class="svg-line" x1="306" y1="97" x2="340" y2="97" marker-end="url(#ar4)"/>
+            <line class="svg-line" x1="466" y1="97" x2="500" y2="97" marker-end="url(#ar4)"/>
+            <line class="svg-line" x1="646" y1="97" x2="680" y2="97" marker-end="url(#ar4)"/>
+            <line class="svg-line" x1="816" y1="97" x2="850" y2="97" marker-end="url(#ar4)"/>
+            <line class="svg-line" x1="241" y1="170" x2="241" y2="128" marker-end="url(#ar4)"/>
+            <line class="svg-line" x1="751" y1="128" x2="751" y2="170" marker-end="url(#ar4)"/>
+            <line class="svg-line" x1="740" y1="170" x2="740" y2="128" marker-end="url(#ar4)"/>
+          </g>
+
+          <text class="svg-t-edge" x="241" y="146" text-anchor="middle">IoU ≥ 0.5 → label 1</text>
+          <text class="svg-t-edge" x="406" y="60" text-anchor="middle">imbalanced</text>
+          <text class="svg-t-edge" x="576" y="60" text-anchor="middle">train split only</text>
+          <text class="svg-t-edge" x="860" y="152" text-anchor="middle">score each epoch</text>
+
+          <!-- feedback to runtime -->
+          <path class="svg-line" d="M 920 128 L 920 236 L 76 236 L 76 128" stroke-dasharray="4 3" marker-end="url(#ar4)" color="var(--ink-3)"/>
+          <text class="svg-t-edge" x="498" y="232" text-anchor="middle">SSN.load → Verifier, back into the runtime path</text>
+        </svg>
+        <figcaption>
+          <b>Augmentation is drawn once per window, not per frame.</b> Motion blur, occluding debris
+          and exposure all have causes that outlast a frame; only sensor noise is independent.
+          Re-rolling the rest per frame would inject exactly the one-frame flicker the network is
+          trained to read as evidence of an artefact — measured at 4.4× the coherent case, and asserted
+          against in <code>data._demo</code>.
+        </figcaption>
+      </figure>
+
+      <div class="note">
+        <p>
+          <strong>Accuracy is the wrong score here.</strong> Harvested windows are mostly negatives, so
+          answering “no survivor” to everything scores well and is worthless. The reported number is
+          <strong>false positives removed at matched recall</strong>: fix the threshold where the
+          network still keeps 98% of real survivors, then count how many of the proposer's false
+          positives it dropped. Gate B asks for ≥ 30%.
+        </p>
+        <p>
+          Recall is held near 1.0 rather than traded off. A missed survivor in a collapsed building is
+          not a metric.
+        </p>
+      </div>
+    </section>
+
+    <!-- ===================== MODULES ===================== -->
+    <section id="modules">
+      <h2>Module by module</h2>
+      <p class="lede">
+        Line numbers are against tag <code>v2</code>. Every module ends in a <code>_demo()</code> that
+        asserts the behaviour it depends on — those are the tests, and they live next to the code they
+        constrain rather than in a parallel tree.
+      </p>
+
+      <!-- model.py -->
+      <article class="module" id="model">
+        <header>
+          <h3>model.py</h3>
+          <span class="layer-tag leaf">leaf · no internal imports</span>
+          <p class="role">The spiking verifier itself, and the two constants everything else agrees on.</p>
+        </header>
+        <div class="module-body">
+          <p>
+            Defines the network that votes on a candidate. Convolution and BatchNorm are folded into a
+            single call over <code>T×B</code> and only the neuron state loops over time — that fusion is
+            the difference between usable and unusable inference on ARM.
+          </p>
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th>Symbol</th><th>Role</th><th>Line</th></tr></thead>
+              <tbody>
+                <tr><td class="sym">ATanSpike</td><td>Heaviside forward, arctan surrogate gradient backward — makes a non-differentiable spike trainable.</td><td class="ln">32</td></tr>
+                <tr><td class="sym">spike<span class="args">(v)</span></td><td>Thin wrapper applying <code>ATanSpike</code>.</td><td class="ln">49</td></tr>
+                <tr><td class="sym">LIF<span class="args">(channels, tau, v_th)</span></td><td>Leaky integrate-and-fire neuron, per-channel learnable decay as <code>sigmoid(w)</code>, hard reset by subtraction.</td><td class="ln">53</td></tr>
+                <tr><td class="sym">SpikingBlock<span class="args">(cin, cout, stride)</span></td><td>conv → BN → LIF across the whole time axis; batches conv over <code>T×B</code>, loops only the membrane.</td><td class="ln">78</td></tr>
+                <tr><td class="sym">SSN<span class="args">(in_ch, widths)</span></td><td>Three blocks then a linear head on pooled spike rate, mean-voted over time. Returns logits <code>(B,)</code>.</td><td class="ln">104</td></tr>
+                <tr><td class="sym">SSN.confidence</td><td>Sigmoid of the forward pass, under <code>no_grad</code> — what the runtime calls.</td><td class="ln">132</td></tr>
+                <tr><td class="sym">SSN.load / SSN.save</td><td>Checkpoint as <code>{state_dict, kwargs}</code>; <code>load</code> rebuilds the geometry from kwargs and returns an eval-mode model.</td><td class="ln">139</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <dl class="wires">
+          <div class="wire"><dt>Imports</dt><dd><span class="none">nothing from ssn</span></dd></div>
+          <div class="wire"><dt>Imported by</dt><dd>all six other modules</dd></div>
+          <div class="wire"><dt>Exports</dt><dd>CROP=64, T_STEPS=6</dd></div>
+        </dl>
+      </article>
+
+      <!-- perception.py -->
+      <article class="module" id="perception">
+        <header>
+          <h3>perception.py</h3>
+          <span class="layer-tag">core · imports model</span>
+          <p class="role">Turns raw frames into verified candidates: warp, propose, track, crop, vote.</p>
+        </header>
+        <div class="module-body">
+          <p>
+            The runtime core. <code>Pipeline.step</code> is the per-frame entry point and is where the
+            single ego-motion warp, the single proposer call and the one batched verification happen in
+            that order.
+          </p>
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th>Symbol</th><th>Role</th><th>Line</th></tr></thead>
+              <tbody>
+                <tr><td class="sym">iou<span class="args">(a, b)</span></td><td>Box overlap. Used by the tracker and by label matching in <code>data.harvest</code>.</td><td class="ln">30</td></tr>
+                <tr><td class="sym">align<span class="args">(prev_gray, cur_gray)</span></td><td>Sparse LK flow → partial affine → warp → signed difference. Cancels camera motion so a still survivor survives the subtraction.</td><td class="ln">41</td></tr>
+                <tr><td class="sym">crop_pair<span class="args">(gray, delta, box)</span></td><td>Builds the 2-channel 64×64 sample in [−1, 1]: luma and ego-compensated delta.</td><td class="ln">64</td></tr>
+                <tr><td class="sym">Track</td><td>One candidate identity: box, hits, misses, and a <code>deque(maxlen=6)</code> of samples. <code>ready</code> is true only at a full window.</td><td class="ln">78</td></tr>
+                <tr><td class="sym">Tracker.update<span class="args">(boxes)</span></td><td>Greedy IoU association, ages out after <code>max_misses</code>, spawns new ids for unmatched boxes. No motion model by choice.</td><td class="ln">105</td></tr>
+                <tr><td class="sym">Proposer.__call__<span class="args">(frame)</span></td><td>YOLOv8n person boxes at confidence 0.15. Weights load lazily on first call.</td><td class="ln">142</td></tr>
+                <tr><td class="sym">Verifier.__call__<span class="args">(tracks)</span></td><td>Batches every ready track into one SSN call, writes back confidences, returns those over threshold.</td><td class="ln">162</td></tr>
+                <tr><td class="sym">Pipeline.step<span class="args">(frame)</span></td><td>Per-frame glue tying the five above together and holding <code>prev_gray</code>.</td><td class="ln">185</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <dl class="wires">
+          <div class="wire"><dt>Imports</dt><dd>model → CROP, T_STEPS, SSN</dd></div>
+          <div class="wire"><dt>Imported by</dt><dd>data, bench, run</dd></div>
+        </dl>
+      </article>
+
+      <!-- localize.py -->
+      <article class="module" id="localize">
+        <header>
+          <h3>localize.py</h3>
+          <span class="layer-tag leaf">leaf · no internal imports</span>
+          <p class="role">Pure geometry: pixel to floor point to grid cell, then deduplication.</p>
+        </header>
+        <div class="module-body">
+          <p>
+            A single camera cannot give depth, but survivors are on the floor — and that one fact
+            supplies the missing constraint. The pixel gives a ray; the plane <code>z = 0</code> gives
+            where it lands. World frame is x east, y north, z up, origin at the arena corner.
+          </p>
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th>Symbol</th><th>Role</th><th>Line</th></tr></thead>
+              <tbody>
+                <tr><td class="sym">Camera.from_fov / .ray</td><td>Pinhole intrinsics from a horizontal FOV; <code>ray</code> returns the unit direction through a pixel in camera frame.</td><td class="ln">35</td></tr>
+                <tr><td class="sym">Pose.from_euler<span class="args">(x, y, z, yaw, pitch, roll)</span></td><td>Camera position plus camera→world rotation, built off the <code>NADIR</code> basis.</td><td class="ln">53</td></tr>
+                <tr><td class="sym">locate<span class="args">(camera, pose, u, v)</span></td><td>Ray–plane intersection with the floor. Returns <code>None</code> for level or upward rays rather than extrapolating a meaningless grazing hit.</td><td class="ln">65</td></tr>
+                <tr><td class="sym">Arena<span class="args">(size, divisions)</span></td><td>15 m square split into a 5×5 letter/number grid; A1 is the origin corner.</td><td class="ln">80</td></tr>
+                <tr><td class="sym">grid_cell<span class="args">(arena, point)</span></td><td>Floor point → <code>"B3"</code>, or <code>None</code> outside the arena.</td><td class="ln">94</td></tr>
+                <tr><td class="sym">SurvivorRegistry.add</td><td>Merges a sighting within <code>radius</code> into a running mean, else creates one; enforces the capacity of 6, and only a stronger sighting may displace a weaker one.</td><td class="ln">119</td></tr>
+                <tr><td class="sym">SurvivorRegistry.report</td><td>Serialisable summary sorted by confidence — what lands in the JSON.</td><td class="ln">143</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <dl class="wires">
+          <div class="wire"><dt>Imports</dt><dd><span class="none">nothing from ssn</span></dd></div>
+          <div class="wire"><dt>Imported by</dt><dd>run only</dd></div>
+        </dl>
+      </article>
+
+      <!-- data.py -->
+      <article class="module" id="data">
+        <header>
+          <h3>data.py</h3>
+          <span class="layer-tag">imports model, perception</span>
+          <p class="role">Harvests labelled windows from footage and augments them without breaking coherence.</p>
+        </header>
+        <div class="module-body">
+          <p>
+            Reuses the exact runtime front-end — same <code>Proposer</code>, same <code>Tracker</code>,
+            same <code>align</code> and <code>crop_pair</code> — so training windows are drawn from the
+            distribution the network will actually meet in flight.
+          </p>
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th>Symbol</th><th>Role</th><th>Line</th></tr></thead>
+              <tbody>
+                <tr><td class="sym">teacher_boxes<span class="args">(frame, model, conf)</span></td><td>YOLOv8l at 0.5 — the label source. Caches the loaded teacher on the function.</td><td class="ln">35</td></tr>
+                <tr><td class="sym">harvest<span class="args">(video, out_dir, …)</span></td><td>Runs the student front-end over footage, labels each completed window by IoU ≥ 0.5 against the teacher, writes one <code>.npz</code> each, clears the buffer so windows never overlap.</td><td class="ln">47</td></tr>
+                <tr><td class="sym">_directional_blur</td><td>Rotated line kernel — the motion-blur primitive.</td><td class="ln">99</td></tr>
+                <tr><td class="sym">augment<span class="args">(sample, rng)</span></td><td>Flip, motion blur, exposure and debris occlusion drawn <em>once per window</em>; only sensor noise is per-frame.</td><td class="ln">109</td></tr>
+                <tr><td class="sym">SequenceDataset</td><td>Indexable view over harvested <code>.npz</code> files; augments only when <code>train=True</code>. <code>labels()</code> exposes the class balance for <code>pos_weight</code>.</td><td class="ln">148</td></tr>
+                <tr><td class="sym">synthetic<span class="args">(count, rng)</span></td><td>Persistent blob vs single-frame flash. Exercises the training loop with no footage; proves the loop runs, never that the model is mission-ready.</td><td class="ln">172</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <dl class="wires">
+          <div class="wire"><dt>Imports</dt><dd>model → CROP, T_STEPS · perception → Proposer, Tracker, align, crop_pair, iou</dd></div>
+          <div class="wire"><dt>Imported by</dt><dd>train</dd></div>
+        </dl>
+      </article>
+
+      <!-- train.py -->
+      <article class="module" id="train">
+        <header>
+          <h3>train.py</h3>
+          <span class="layer-tag">imports model, data</span>
+          <p class="role">The optimisation loop, and the metric the mission is actually judged on.</p>
+        </header>
+        <div class="module-body">
+          <p>
+            Scores the network the way Gate B does. The threshold is swept over observed scores rather
+            than fixed at 0.5, because an untrained network's outputs sit in a narrow band and a fixed
+            cut would report nonsense.
+          </p>
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th>Symbol</th><th>Role</th><th>Line</th></tr></thead>
+              <tbody>
+                <tr><td class="sym">matched_recall<span class="args">(scores, labels, target_recall)</span></td><td>Highest threshold still keeping 98% of survivors, and the share of proposer false positives removed there. Refuses to buy reduction by dropping survivors.</td><td class="ln">34</td></tr>
+                <tr><td class="sym">evaluate<span class="args">(model, loader)</span></td><td>Collects sigmoid scores across a loader and hands them to <code>matched_recall</code>.</td><td class="ln">68</td></tr>
+                <tr><td class="sym">train<span class="args">(model, train_loader, val_loader, …)</span></td><td>BCE-with-logits and <code>pos_weight</code> for the imbalance; scores each epoch, writes the checkpoint whenever FP-reduction improves, returns the best metrics plus history.</td><td class="ln">79</td></tr>
+                <tr><td class="sym">_loaders<span class="args">(dataset, batch_size, …)</span></td><td>Seeded train/val split.</td><td class="ln">117</td></tr>
+                <tr><td class="sym">main</td><td>CLI over either <code>--data DIR</code> or <code>--synthetic N</code>; prints the Gate B verdict, and refuses to claim one on synthetic data.</td><td class="ln">126</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <dl class="wires">
+          <div class="wire"><dt>Imports</dt><dd>data → SequenceDataset, synthetic · model → SSN</dd></div>
+          <div class="wire"><dt>Imported by</dt><dd><span class="none">nothing — entry point</span></dd></div>
+          <div class="wire"><dt>Note</dt><dd>the <code>train</code> function is deliberately not re-exported from the package</dd></div>
+        </dl>
+      </article>
+
+      <!-- bench.py -->
+      <article class="module" id="bench">
+        <header>
+          <h3>bench.py</h3>
+          <span class="layer-tag">imports model, perception</span>
+          <p class="role">Measures the three costs that move, against the 120 ms frame budget.</p>
+        </header>
+        <div class="module-body">
+          <p>
+            The verifier is batched over candidates, so its cost is reported per batch size — what
+            matters is the whole batch finishing inside one frame, not a per-item mean.
+          </p>
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th>Symbol</th><th>Role</th><th>Line</th></tr></thead>
+              <tbody>
+                <tr><td class="sym">time_ms<span class="args">(fn, repeats, warmup)</span></td><td>Warms up, then returns min / median / p95 / max. <code>min</code> is the comparator that survives scheduler noise.</td><td class="ln">30</td></tr>
+                <tr><td class="sym">bench_model<span class="args">(model, batches, repeats)</span></td><td>SSN forward at batch 1, 3 and 5.</td><td class="ln">47</td></tr>
+                <tr><td class="sym">bench_align</td><td>Times the per-frame ego-motion warp — in practice the largest single cost.</td><td class="ln">57</td></tr>
+                <tr><td class="sym">bench_proposer</td><td>Times YOLOv8n with the weight load outside the timed region. Opt-in via <code>--proposer</code>.</td><td class="ln">64</td></tr>
+                <tr><td class="sym">main</td><td>Prints the table, sums a cycle p95, states the margin, and says plainly that the numbers do not transfer off this machine.</td><td class="ln">80</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <dl class="wires">
+          <div class="wire"><dt>Imports</dt><dd>model → CROP, T_STEPS, SSN · perception → Proposer, align</dd></div>
+          <div class="wire"><dt>Imported by</dt><dd><span class="none">nothing — entry point</span></dd></div>
+        </dl>
+      </article>
+
+      <!-- run.py -->
+      <article class="module" id="run">
+        <header>
+          <h3>run.py</h3>
+          <span class="layer-tag">imports model, perception, localize</span>
+          <p class="role">The mission: video in, survivor grid events out as JSON.</p>
+        </header>
+        <div class="module-body">
+          <p>
+            The only module that touches all three others. <code>Mission.step</code> is where perception
+            meets geometry — it takes verified tracks, projects the <em>bottom edge</em> of each box
+            (floor contact, not the centre, which would put a standing person half a body too far) and
+            merges the result into the registry.
+          </p>
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th>Symbol</th><th>Role</th><th>Line</th></tr></thead>
+              <tbody>
+                <tr><td class="sym">Mission.step<span class="args">(frame, timestamp)</span></td><td>Pipeline step → <code>locate</code> on each verified box → <code>registry.add</code> → event dicts.</td><td class="ln">36</td></tr>
+                <tr><td class="sym">build<span class="args">(width, height, hfov, altitude, weights, threshold)</span></td><td>Assembles camera, arena, pipeline, registry and the pose callable into a <code>Mission</code>.</td><td class="ln">55</td></tr>
+                <tr><td class="sym">run<span class="args">(source, out_path, max_frames, mission, show)</span></td><td>Capture loop over a file or webcam index; releases the capture and swallows the headless <code>destroyAllWindows</code> failure in <code>finally</code>.</td><td class="ln">69</td></tr>
+                <tr><td class="sym">main</td><td>CLI. Warns on stderr when no <code>--weights</code> is given rather than quietly emitting confident nonsense.</td><td class="ln">108</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <dl class="wires">
+          <div class="wire"><dt>Imports</dt><dd>localize → Arena, Camera, Pose, SurvivorRegistry, locate · perception → Pipeline, Proposer, Tracker, Verifier · model → SSN</dd></div>
+          <div class="wire"><dt>Imported by</dt><dd><span class="none">nothing — entry point</span></dd></div>
+        </dl>
+      </article>
+
+      <div class="note">
+        <p>
+          <strong>Pose is injected, not solved.</strong> There is no SLAM in this package.
+          <code>build</code> installs a fixed hover pose, which is honest only for footage from a
+          stationary camera. Real flight video through the default pose produces confident, wrong grid
+          cells — the flight build must supply a real <code>pose_at(t)</code>.
+        </p>
+      </div>
+    </section>
+
+    <!-- ===================== ENTRY POINTS ===================== -->
+    <section id="entry">
+      <h2>Entry points</h2>
+      <p class="lede">Four CLIs, in the order you would use them.</p>
+      <div class="cmds">
+        <div class="cmd">
+          <code>python -m ssn.data flight.mp4 <span class="flag">--out</span> dataset</code>
+          <span>Harvest labelled windows from footage.</span>
+        </div>
+        <div class="cmd">
+          <code>python -m ssn.train <span class="flag">--data</span> dataset <span class="flag">--epochs</span> 40</code>
+          <span>Train, scored on FP removed at matched recall.</span>
+        </div>
+        <div class="cmd">
+          <code>python -m ssn.bench <span class="flag">--proposer</span></code>
+          <span>Latency on the hardware you will actually fly.</span>
+        </div>
+        <div class="cmd">
+          <code>python -m ssn.run flight.mp4 <span class="flag">--weights</span> ssn.pt</code>
+          <span>Run the mission, write survivors.json.</span>
+        </div>
+        <div class="cmd">
+          <code>python tests/test_ssn.py</code>
+          <span>All seven module self-checks, about 15 seconds.</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== CONSTANTS ===================== -->
+    <section id="constants">
+      <h2>Shared constants</h2>
+      <p class="lede">
+        The numbers more than one module agrees on. Changing any of them changes the contract between
+        stages, so they live in one place each.
+      </p>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>Constant</th><th>Value</th><th>Defined in</th><th>Why it is that</th></tr></thead>
+          <tbody>
+            <tr><td class="sym">CROP</td><td class="sym">64</td><td class="sym">model</td><td>Cheap enough to run five candidates per frame alongside the proposer and SLAM front-end.</td></tr>
+            <tr><td class="sym">T_STEPS</td><td class="sym">6</td><td class="sym">model</td><td>One step per real captured frame — the time axis is wall-clock, not a simulation axis.</td></tr>
+            <tr><td class="sym">TEACHER_CONF</td><td class="sym">0.5</td><td class="sym">data</td><td>The teacher must be right, not generous; it defines ground truth.</td></tr>
+            <tr><td class="sym">MATCH_IOU</td><td class="sym">0.5</td><td class="sym">data</td><td>Overlap at which a tracked candidate counts as the teacher's detection.</td></tr>
+            <tr><td class="sym">TARGET_RECALL</td><td class="sym">0.98</td><td class="sym">train</td><td>Survivors kept while false positives are cut. Not traded away.</td></tr>
+            <tr><td class="sym">GATE_B_REDUCTION</td><td class="sym">0.30</td><td class="sym">train</td><td>Competition pass mark for false-positive reduction.</td></tr>
+            <tr><td class="sym">FRAME_BUDGET_MS</td><td class="sym">120</td><td class="sym">bench</td><td>One full verification cycle at mission frame rate.</td></tr>
+            <tr><td class="sym">PROPOSER_BUDGET_MS</td><td class="sym">25</td><td class="sym">bench</td><td>Share of that budget the detector may take.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="note">
+        <p>
+          <strong>Current status.</strong> Everything above runs and is checked, but the model is
+          untrained — that needs maze footage, which does not exist yet. The pipeline is verified
+          mechanically on synthetic video and synthetic windows; Gate B is not assessable until there is
+          something real to train on.
+        </p>
+      </div>
+    </section>
+
+    <footer>
+      <span>github.com/QuantaBoy/SSN</span>
+      <span>tag v2 · commit 8458663</span>
+      <span>7/7 self-checks passing</span>
+      <span>cycle p95 25.3 ms of 120 ms</span>
+    </footer>
+
+  </main>
+</div>
+</body>
+</html>
